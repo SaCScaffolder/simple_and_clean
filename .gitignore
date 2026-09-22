@@ -27,3 +27,13 @@ test-*/
 
 # Logs
 *.log
+
+# doctor-go (Go sidecar validator)
+src/doctor-go/doctor-go
+src/doctor-go/doctor-go.exe
+
+# sdk-ts (TypeScript SDK)
+src/sdk-ts/node_modules/
+src/sdk-ts/dist/
+src/sdk-ts/coverage/
+src/sdk-ts/*.tsbuildinfo

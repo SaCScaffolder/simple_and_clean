@@ -20,6 +20,21 @@ little weird.
 Built from patterns I learned running deployment orchestration for 1,700+
 services at Microsoft.
 
+## Polyglot by design
+
+`servicectl` is a platform tool that emits services in multiple runtimes.
+The platform tooling itself reflects that reality — three language
+subpackages under one umbrella, each using the right tool for its job:
+
+| Subpackage | Language | Purpose | Source of truth? |
+|---|---|---|---|
+| [`src/servicectl/`](src/servicectl/) | Python | Scaffolder + full doctor | **Yes** |
+| [`src/doctor-go/`](src/doctor-go/) | Go | Fast-path validator (focused subset of doctor) | No — mirrors Python |
+| [`src/sdk-ts/`](src/sdk-ts/) | TypeScript | Typed wrapper around the CLI for chatops/CI/scripts | No — calls Python CLI |
+
+See [`src/PACKAGES.md`](src/PACKAGES.md) for the full layout and per-package
+development instructions.
+
 ## Why this exists
 
 I'm a platform engineer. The job I loved most was turning deployment

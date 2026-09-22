@@ -33,6 +33,71 @@ jobs:
       - name: Run smoke tests
         run: python tests/test_smoke.py
 
+  doctor-go:
+    name: "doctor-go (Go ${{ matrix.go-version }}, ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        go-version: ["1.22", "1.27"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: src/doctor-go/go.sum
+
+      - name: Run go vet
+        working-directory: src/doctor-go
+        run: go vet ./...
+
+      - name: Run go test
+        working-directory: src/doctor-go
+        run: go test ./... -count=1
+
+      - name: Build doctor-go
+        working-directory: src/doctor-go
+        run: go build -o doctor-go .
+
+  sdk-ts:
+    name: "sdk-ts (Node ${{ matrix.node-version }}, ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node-version: ["20", "22"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: src/sdk-ts/package-lock.json
+
+      - name: Install dependencies
+        working-directory: src/sdk-ts
+        run: npm ci || npm install
+
+      - name: Typecheck
+        working-directory: src/sdk-ts
+        run: npm run typecheck
+
+      - name: Run vitest
+        working-directory: src/sdk-ts
+        run: npm test
+
+      - name: Build
+        working-directory: src/sdk-ts
+        run: npm run build
+
   bicep-validate:
     name: "best-effort - Bicep validation (informational only)"
     runs-on: ubuntu-latest
@@ -78,14 +143,16 @@ jobs:
           bicep --version
 
       - name: Validate generated Bicep
+        # Bicep 0.30+ removed the --file flag in favor of a positional
+        # input argument. --outfile is still supported for output.
         run: |
           set -e
           bicep build \
-              --file _ci_scratch/sample-svc/infra/main.bicep \
+              _ci_scratch/sample-svc/infra/main.bicep \
               --outfile _ci_scratch/sample-svc/infra/main.json
           for env in dev staging prod; do
               bicep build-params \
-                  --file _ci_scratch/sample-svc/infra/${env}.bicepparam \
+                  _ci_scratch/sample-svc/infra/${env}.bicepparam \
                   --outfile _ci_scratch/sample-svc/infra/${env}.bicepparam.json
           done
           echo "Bicep and bicepparam builds succeeded."
