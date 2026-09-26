@@ -43,7 +43,7 @@ class ServiceGenerator:
             raise ScaffoldError(f"service name contains invalid character(s): {sorted(bad & set(self.name))}")
         if self.template not in list_templates():
             raise ScaffoldError(f"unknown template: {self.template!r}")
-        if self.deploy_target not in {"local", "azure", "azure-container-apps"}:
+        if self.deploy_target not in {"local", "azure"}:
             raise ScaffoldError(f"unknown deploy target: {self.deploy_target!r}")
         # Make sure we don't overwrite an existing directory.
         target = (self.output_dir / self.name).resolve()

@@ -70,7 +70,11 @@ def main() -> None:
 @click.option(
     "--deploy",
     "deploy_target",
-    type=click.Choice(["local", "azure", "azure-container-apps"], case_sensitive=False),
+    # NOTE: `azure-container-apps` is on the roadmap but not yet implemented.
+    # Until the overlay exists, leaving the option would produce a broken
+    # App Service scaffold that calls `az webapp restart` against a
+    # non-existent Container App. Re-add when the full overlay ships.
+    type=click.Choice(["local", "azure"], case_sensitive=False),
     default="local",
     show_default=True,
     help="Deployment target.",
@@ -150,11 +154,6 @@ def init(
             "  az deployment group create --resource-group <rg> \\\n"
             "      --template-file infra/main.bicep \\\n"
             "      --parameters infra/dev.bicepparam"
-        )
-    elif deploy_target == "azure-container-apps":
-        deploy_hint = (
-            "  az login\n"
-            "  az containerapp up --source . --resource-group <rg> --environment <env>"
         )
     else:
         deploy_hint = ""

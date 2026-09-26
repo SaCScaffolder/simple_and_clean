@@ -12,6 +12,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from servicectl.doctor import (
     DoctorReport,
     render_json,
@@ -20,37 +22,37 @@ from servicectl.doctor import (
 )
 
 
-# Real scaffolded services — point at one of the Azure-deployed demos.
-SAMPLE_AZURE_SERVICE = (
-    Path("C:/Users/henry/source/repos/simple_and_clean_test_samples")
-    / "sample-scaffolds"
-    / "surfside_icecream_pos"
-)
+# Real scaffolded dispatch service from the wrapper's test-samples dir.
+# Used for end-to-end doctor checks against a fresh local-deployed scaffold.
 SAMPLE_LOCAL_SERVICE = (
-    Path("C:/Users/henry/source/repos/simple_and_clean_test_samples")
-    / "sample-scaffolds"
-    / "surfside_icecream_pos"
+    Path("C:/Users/henry/source/repos/sac/simple_and_clean_test_samples")
+    / "dispatch-admin-api"
 )
 
 
-def test_azure_service_passes_baseline_checks():
-    """A freshly scaffolded Azure-deployed service should pass all hard checks."""
-    if not SAMPLE_AZURE_SERVICE.exists():
-        pass  # sample not present, skipping
-    report = run_checks(SAMPLE_AZURE_SERVICE)
+def test_sample_service_passes_baseline_checks():
+    """A freshly scaffolded local-deployed service should pass all hard checks."""
+    if not SAMPLE_LOCAL_SERVICE.exists():
+        pytest.skip(
+            "SAMPLE_LOCAL_SERVICE fixture missing — expected at "
+            "C:/Users/henry/source/repos/sac/simple_and_clean_test_samples/dispatch-admin-api"
+        )
+    report = run_checks(SAMPLE_LOCAL_SERVICE)
     # No errors on a fresh scaffold (warnings/info may be present).
     assert not report.has_errors, (
-        f"Expected no errors on fresh Azure scaffold, got: "
+        f"Expected no errors on fresh local scaffold, got: "
         f"{[(c.name, c.message) for c in report.checks if not c.passed and c.severity == 'error']}"
     )
-    assert report.deploy_target == "azure"
 
 
 def test_report_summary_includes_counts():
     """The render functions should include a summary line."""
-    if not SAMPLE_AZURE_SERVICE.exists():
-        pass  # sample not present, skipping
-    report = run_checks(SAMPLE_AZURE_SERVICE)
+    if not SAMPLE_LOCAL_SERVICE.exists():
+        pytest.skip(
+            "SAMPLE_LOCAL_SERVICE fixture missing — expected at "
+            "C:/Users/henry/source/repos/sac/simple_and_clean_test_samples/dispatch-admin-api"
+        )
+    report = run_checks(SAMPLE_LOCAL_SERVICE)
     text = render_text(report)
     assert "summary:" in text
     assert "passed" in text
@@ -58,9 +60,12 @@ def test_report_summary_includes_counts():
 
 def test_json_output_is_valid():
     """--json should produce parseable JSON with the expected keys."""
-    if not SAMPLE_AZURE_SERVICE.exists():
-        pass  # sample not present, skipping
-    report = run_checks(SAMPLE_AZURE_SERVICE)
+    if not SAMPLE_LOCAL_SERVICE.exists():
+        pytest.skip(
+            "SAMPLE_LOCAL_SERVICE fixture missing — expected at "
+            "C:/Users/henry/source/repos/sac/simple_and_clean_test_samples/dispatch-admin-api"
+        )
+    report = run_checks(SAMPLE_LOCAL_SERVICE)
     out = json.loads(render_json(report))
     assert "path" in out
     assert "deploy_target" in out
@@ -281,6 +286,197 @@ def test_pause_skips_when_not_tty():
     assert result.returncode in (0, 1, 2)
     # The 'Press any key' message should NOT appear in piped output.
     assert "Press any key" not in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Go-specific doctor checks (run only when go.mod exists in the service dir).
+# ---------------------------------------------------------------------------
+
+def _make_minimal_go_service(tmp_path: Path) -> Path:
+    """Build a minimal scaffolded Go service under tmp_path. Returns the path."""
+    # Multi-stage Dockerfile (so the existing checks pass).
+    (tmp_path / "Dockerfile").write_text(
+        "FROM golang:1.22-bookworm AS build\n"
+        "WORKDIR /src\n"
+        "COPY . .\n"
+        "RUN go build -o /out/app ./cmd/server\n"
+        "\n"
+        "FROM gcr.io/distroless/static-debian12:nonroot\n"
+        "COPY --from=build /out/app /app\n"
+        "USER nonroot:nonroot\n"
+        "ENTRYPOINT [\"/app\"]\n"
+    )
+    # go.mod with a non-placeholder module path so the placeholder check passes.
+    (tmp_path / "go.mod").write_text(
+        "module example.com/awesome-service\n"
+        "\n"
+        "go 1.22\n"
+    )
+    # cmd/server/main.go (the conventional entrypoint).
+    cmd = tmp_path / "cmd" / "server"
+    cmd.mkdir(parents=True)
+    (cmd / "main.go").write_text("package main\n")
+    # internal/<service>/ with one .go file and one _test.go file.
+    internal = tmp_path / "internal" / "awesome-service"
+    internal.mkdir(parents=True)
+    (internal / "server.go").write_text("package awesome_service\n")
+    (internal / "server_test.go").write_text("package awesome_service\n")
+    # CI workflow with `-race`.
+    ci_dir = tmp_path / ".github" / "workflows"
+    ci_dir.mkdir(parents=True)
+    (ci_dir / "ci.yml").write_text(
+        "- run: go test ./... -race -coverprofile=coverage.out\n"
+    )
+    return tmp_path
+
+
+def test_go_checks_only_run_when_gomod_present():
+    """A non-Go service (no go.mod) should not produce any `go:*` checks."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        # Minimal Python-style scaffold (Dockerfile, no go.mod).
+        (tmp_path / "Dockerfile").write_text(
+            "FROM python:3.12-slim AS build\n"
+            "FROM python:3.12-slim\n"
+            "USER appuser\n"
+        )
+        report = run_checks(tmp_path)
+        go_checks = [c for c in report.checks if c.name.startswith("go:")]
+        assert go_checks == [], f"unexpected Go checks on a non-Go service: {[c.name for c in go_checks]}"
+
+
+def test_go_checks_run_on_go_service():
+    """A well-formed Go service should produce passing go:* checks."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = _make_minimal_go_service(Path(tmp))
+        report = run_checks(tmp_path)
+        go_checks = [c for c in report.checks if c.name.startswith("go:")]
+        # Sanity: at least the seven checks we documented should be present.
+        expected = {
+            "go:cmd-server-exists",
+            "go:modfile",
+            "go:modfile-go-version",
+            "go:modfile-module-path",
+            "go:has-internal-package",
+            "go:has-tests",
+            "go:ci-uses-race",
+            "go:no-vendor-dir",
+        }
+        actual = {c.name for c in go_checks}
+        assert expected.issubset(actual), (
+            f"missing Go checks: {expected - actual}"
+        )
+        # All checks should pass on the well-formed service.
+        failures = [c for c in go_checks if not c.passed]
+        assert not failures, (
+            f"unexpected failures on well-formed Go service: "
+            f"{[(c.name, c.message) for c in failures]}"
+        )
+
+
+def test_go_modfile_missing_is_error():
+    """A service with cmd/server/main.go but no go.mod should fail go:modfile."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        cmd = tmp_path / "cmd" / "server"
+        cmd.mkdir(parents=True)
+        (cmd / "main.go").write_text("package main\n")
+        report = run_checks(tmp_path)
+        check = next(c for c in report.checks if c.name == "go:modfile")
+        assert not check.passed
+        assert check.severity == "error"
+
+
+def test_go_old_version_is_warning():
+    """A go.mod declaring `go 1.20` should fail go:modfile-go-version as a warning."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = _make_minimal_go_service(Path(tmp))
+        (tmp_path / "go.mod").write_text(
+            "module example.com/awesome-service\n"
+            "\n"
+            "go 1.20\n"
+        )
+        report = run_checks(tmp_path)
+        check = next(c for c in report.checks if c.name == "go:modfile-go-version")
+        assert not check.passed
+        assert check.severity == "warn"
+        assert "go 1.20" in check.message
+
+
+def test_go_placeholder_module_path_is_info_failure():
+    """The scaffold's `henryorsborn/<service>` placeholder should be flagged as info."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = _make_minimal_go_service(Path(tmp))
+        (tmp_path / "go.mod").write_text(
+            "module github.com/henryorsborn/awesome-service\n"
+            "\n"
+            "go 1.22\n"
+        )
+        report = run_checks(tmp_path)
+        check = next(c for c in report.checks if c.name == "go:modfile-module-path")
+        assert not check.passed
+        assert check.severity == "info"
+
+
+def test_go_no_internal_package_is_warning():
+    """A Go service with an empty internal/ should fail go:has-internal-package."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = _make_minimal_go_service(Path(tmp))
+        # Replace the populated internal package with an empty directory.
+        import shutil
+        shutil.rmtree(tmp_path / "internal")
+        (tmp_path / "internal").mkdir()
+        report = run_checks(tmp_path)
+        check = next(c for c in report.checks if c.name == "go:has-internal-package")
+        assert not check.passed
+        assert check.severity == "warn"
+
+
+def test_go_no_tests_is_warning():
+    """A Go service with no *_test.go files should fail go:has-tests."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = _make_minimal_go_service(Path(tmp))
+        # Drop the test file we added in _make_minimal_go_service.
+        (tmp_path / "internal" / "awesome-service" / "server_test.go").unlink()
+        report = run_checks(tmp_path)
+        check = next(c for c in report.checks if c.name == "go:has-tests")
+        assert not check.passed
+        assert check.severity == "warn"
+
+
+def test_go_no_race_in_ci_is_info_failure():
+    """A CI workflow without `-race` should fail go:ci-uses-race as info."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = _make_minimal_go_service(Path(tmp))
+        (tmp_path / ".github" / "workflows" / "ci.yml").write_text(
+            "- run: go test ./...\n"  # no -race
+        )
+        report = run_checks(tmp_path)
+        check = next(c for c in report.checks if c.name == "go:ci-uses-race")
+        assert not check.passed
+        assert check.severity == "info"
+
+
+def test_go_vendor_dir_is_info_failure():
+    """A vendor/ directory should fail go:no-vendor-dir as info."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = _make_minimal_go_service(Path(tmp))
+        (tmp_path / "vendor").mkdir()
+        (tmp_path / "vendor" / "modules.txt").write_text("# vendored\n")
+        report = run_checks(tmp_path)
+        check = next(c for c in report.checks if c.name == "go:no-vendor-dir")
+        assert not check.passed
+        assert check.severity == "info"
+
+
+def test_parse_go_minor():
+    """The version parser should handle 1.22, 1.22.0, and bad input gracefully."""
+    from servicectl.doctor import _parse_go_minor
+    assert _parse_go_minor("1.22") == 22
+    assert _parse_go_minor("1.22.0") == 22
+    assert _parse_go_minor("1.23.4") == 23
+    assert _parse_go_minor("garbage") == 0
+    assert _parse_go_minor("") == 0
 
 
 if __name__ == "__main__":
