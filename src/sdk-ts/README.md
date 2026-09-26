@@ -73,7 +73,7 @@ try {
 ```typescript
 interface ServiceConfig {
   name: string;                          // required, lowercase-with-dashes
-  template: 'node-express' | 'python-flask' | 'dotnet-webapi';
+  template: 'node-express' | 'node-react-web' | 'python-flask' | 'dotnet-webapi' | 'go-webapi';
   ci?: 'github-actions' | 'azure-devops';
   deploy?: 'local' | 'azure' | 'azure-container-apps';
   azureRegion?: string;

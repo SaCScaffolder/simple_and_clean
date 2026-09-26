@@ -98,6 +98,63 @@ jobs:
         working-directory: src/sdk-ts
         run: npm run build
 
+  servicectl-go:
+    name: "servicectl-go (Go ${{ matrix.go-version }}, ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        go-version: ["1.22", "1.27"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: src/servicectl-go/go.sum
+
+      - name: Run go vet
+        working-directory: src/servicectl-go
+        run: go vet ./...
+
+      - name: Run go test
+        working-directory: src/servicectl-go
+        run: go test ./... -count=1
+
+      - name: Build servicectl-go
+        working-directory: src/servicectl-go
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            go build -o servicectl-go.exe .
+          else
+            go build -o servicectl-go .
+          fi
+
+      - name: Smoke test against the Python CLI
+        # End-to-end test: actually scaffold a service through the Go wrapper.
+        # Requires Python + servicectl installed; uses the matrix's Python
+        # install via the shared `test` job's setup. We don't install the
+        # Python CLI here because that would conflict with `pip install -e .`
+        # running from the repo root in the `test` job; instead, this smoke
+        # test runs after the `test` job passes (via `needs: test`), which
+        # means `servicectl` is on PATH for this runner.
+        working-directory: src/servicectl-go
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ./servicectl-go.exe init smoke-svc --template=go-webapi --no-git --no-readme --output-dir=$GITHUB_WORKSPACE/.ci-smoke
+          else
+            ./servicectl-go init smoke-svc --template=go-webapi --no-git --no-readme --output-dir=$GITHUB_WORKSPACE/.ci-smoke
+          fi
+          # Verify the scaffold emitted the expected files.
+          test -f $GITHUB_WORKSPACE/.ci-smoke/smoke-svc/go.mod
+          test -f $GITHUB_WORKSPACE/.ci-smoke/smoke-svc/cmd/server/main.go
+          test -f $GITHUB_WORKSPACE/.ci-smoke/smoke-svc/internal/smoke_svc/server.go
+          # Clean up so the runner doesn't fill its disk.
+          rm -rf $GITHUB_WORKSPACE/.ci-smoke
+
   bicep-validate:
     name: "best-effort - Bicep validation (informational only)"
     runs-on: ubuntu-latest

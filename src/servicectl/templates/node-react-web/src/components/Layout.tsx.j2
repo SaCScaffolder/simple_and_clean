@@ -1,0 +1,42 @@
+import { Link, Outlet } from "react-router-dom";
+
+/**
+ * App shell — header + main + footer. Replace the contents with your
+ * real navigation once the page count grows beyond ~3.
+ */
+export default function Layout() {
+  return (
+    <div className="flex min-h-screen flex-col bg-background text-foreground">
+      <header className="border-b">
+        <div className="container flex h-14 items-center justify-between">
+          <Link to="/" className="font-semibold tracking-tight">
+            {/* Replace with your real product name. */}
+            {`{{ service_name }}`}
+          </Link>
+          <nav className="text-sm text-muted-foreground">
+            {/* Add nav items here as routes grow. */}
+            <span>v0.1.0</span>
+          </nav>
+        </div>
+      </header>
+
+      <main className="flex-1">
+        <Outlet />
+      </main>
+
+      <footer className="border-t text-xs text-muted-foreground">
+        <div className="container py-4">
+          scaffolded by{" "}
+          <a
+            className="underline"
+            href="https://github.com/henryorsborn/servicectl"
+            target="_blank"
+            rel="noreferrer"
+          >
+            servicectl
+          </a>
+        </div>
+      </footer>
+    </div>
+  );
+}

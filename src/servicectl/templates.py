@@ -17,8 +17,10 @@ from importlib import resources
 # Registry: id -> short description (used in --help).
 TEMPLATES: dict[str, str] = {
     "node-express": "Node.js + Express + PostgreSQL",
+    "node-react-web": "Node 20 + Vite + React 18 + TypeScript + Tailwind + shadcn/ui (SPA)",
     "python-flask": "Python + Flask + PostgreSQL",
     "dotnet-webapi": ".NET / C# Web API + PostgreSQL",
+    "go-webapi": "Go 1.22+ + net/http + PostgreSQL (distroless runtime)",
 }
 
 

@@ -1,0 +1,19 @@
+# Things that should never make it into a Docker build context.
+node_modules
+.git
+.gitignore
+.github
+.devcontainer
+.env
+.env.*
+!.env.example
+README.md
+docs
+tests
+coverage
+dist
+.vite
+.vscode
+.idea
+*.log
+*.local

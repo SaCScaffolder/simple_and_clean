@@ -1,0 +1,72 @@
+// Package {{ service_name_snake }} is the HTTP handler layer for {{ service_name }}.
+//
+// This is the smallest useful scaffold: a mux with /healthz and /readyz,
+// plus a stub index handler. Replace it with your real handlers.
+//
+// Convention: handlers are methods on a *Server struct so you can inject
+// dependencies (DB, logger, config) via NewServer and pass *Server around.
+// Mux() returns the bare mux for the rare case where you don't need DI.
+package {{ service_name_snake }}
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+// NewMux returns a mux with the baseline /healthz and /readyz endpoints
+// wired up. This is what cmd/server/main.go uses by default.
+//
+// For real services, prefer NewServer(deps).Mux() so you can pass a DB,
+// logger, config, etc. into the handlers.
+func NewMux() *http.ServeMux {
+	return NewServer(nil).Mux()
+}
+
+// Server holds the dependencies your handlers need. Add fields as you go:
+// db *sql.DB, log *slog.Logger, cfg *Config, etc.
+type Server struct {
+	// deps placeholder — fill in as the service grows.
+}
+
+// NewServer constructs a Server. Pass nil for the scaffold; pass real
+// dependencies for a real service.
+func NewServer(_ any) *Server {
+	return &Server{}
+}
+
+// Mux returns the HTTP mux with all routes registered.
+func (s *Server) Mux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", s.healthz)
+	mux.HandleFunc("/readyz", s.readyz)
+	mux.HandleFunc("/", s.index)
+	return mux
+}
+
+// healthz returns 200 as long as the process is alive. Used by load
+// balancers and Kubernetes liveness probes.
+func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// readyz returns 200 when the service is ready to serve traffic. Used by
+// Kubernetes readiness probes. The scaffold always returns ready; replace
+// with real readiness checks (DB ping, dependency reachability, etc.).
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+// index is the placeholder for the root endpoint. Replace with your real
+// API surface.
+func (s *Server) index(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"service": "{{ service_name }}",
+		"status":  "running",
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}

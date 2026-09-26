@@ -1,0 +1,20 @@
+# Things that should never make it into a Docker build context.
+.git/
+.gitignore
+.github/
+.devcontainer/
+.env
+.env.*
+!.env.example
+README.md
+docs/
+tests/
+*.log
+coverage.out
+*.test
+*.out
+bin/
+dist/
+build/
+.vscode/
+.idea/

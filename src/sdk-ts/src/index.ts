@@ -18,6 +18,15 @@
  *   scaffolder in TypeScript — that would duplicate the Python logic and
  *   drift over time. The Python CLI stays the source of truth; the SDK
  *   is a typed affordance layer on top of it.
+ *
+ *   Available templates:
+ *     - 'node-express'      Node.js + Express + PostgreSQL backend
+ *     - 'node-react-web'    Vite + React + Tailwind + shadcn/ui SPA
+ *     - 'python-flask'      Python + Flask + PostgreSQL backend
+ *     - 'dotnet-webapi'     .NET Web API + PostgreSQL backend
+ *     - 'go-webapi'         Go + net/http + PostgreSQL backend
+ *
+ *   Keep this list in sync with src/servicectl/templates.py.
  */
 
 import { spawn } from 'node:child_process';
@@ -29,6 +38,7 @@ import { join, resolve } from 'node:path';
 /** Templates supported by `servicectl init --template=...`. */
 export type TemplateId =
   | 'node-express'
+  | 'node-react-web'
   | 'python-flask'
   | 'dotnet-webapi';
 

@@ -7,6 +7,56 @@ All notable changes to `servicectl` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`go-webapi` template.** Go 1.22+ web API scaffold with `cmd/server/` +
+  `internal/<service>/` layout, distroless static multi-stage Dockerfile,
+  nonroot user, GitHub Actions + Azure DevOps CI (vet → race-detector test
+  with configurable coverage threshold → Trivy scan → publish), docker-compose
+  dev stack with Postgres, `.devcontainer/`, `.gitleaks.toml`,
+  `.env.example`, gitleaks baseline, README. Registered in
+  `src/servicectl/templates.py` and added to the SDK's `TemplateId` union
+  in `src/sdk-ts/src/index.ts`. Two new smoke tests
+  (`test_go_webapi_scaffolds`, `test_go_webapi_dashed_name_substitutes_correctly`)
+  cover file emission and `service_name_snake` substitution in
+  `internal/<service>/` paths.
+- **`docs/quickstart.md`** — three-entry-point quickstart (Python CLI,
+  TypeScript SDK, Go sidecar) with explicit calls for when to use each,
+  plus a "Scaffolding a Go service today" section that documents the
+  current state of the Go template path.
+- **Go-specific doctor checks.** Eight new checks fire automatically when a
+  service looks like a Go service (has `go.mod` or `cmd/server/main.go`):
+  `go:cmd-server-exists`, `go:modfile`, `go:modfile-go-version`,
+  `go:modfile-module-path`, `go:has-internal-package`, `go:has-tests`,
+  `go:ci-uses-race`, `go:no-vendor-dir`. Implemented in both
+  `src/servicectl/doctor.py` (the source of truth) and `src/doctor-go/main.go`
+  (the Go mirror). 9 new Python tests and 9 new Go tests cover the matrix
+  of pass / fail cases per check.
+- **`src/servicectl-go/`** — a thin Go CLI wrapper around the Python CLI,
+  mirroring the `sdk-ts` pattern for TypeScript. Single static binary,
+  stdlib only. Parses a typed `resolvedConfig` struct, builds the same
+  flags the Python CLI accepts, and shells out to `python -m servicectl
+  init`. Supports both Go-convention (`init --template=foo my-svc`) and
+  Python-convention (`init my-svc --template=foo`) arg ordering via the
+  `splitName` helper. Includes a comprehensive 23 KB README with install
+  instructions, full flag reference, usage patterns, error codes, and
+  troubleshooting. 3 unit tests cover `splitName`, name validation, and
+  template id validation.
+- **`node-react-web` template.** Frontend SPA scaffold with Vite 5 + React
+  18 + TypeScript + Tailwind + shadcn/ui (light/dark mode, CSS variables,
+  example Button primitive). Multi-stage Docker build with node build stage
+  → nginx-alpine runtime serving the static `dist/` folder. SPA-friendly
+  nginx config (fallback to index.html for client-side routing). Vitest +
+  @testing-library/react for tests, eslint with `--max-warnings 0` gate.
+  GitHub Actions + Azure DevOps CI: typecheck → lint → test (with
+  configurable coverage threshold, enforced in CI via vitest thresholds +
+  jq awk gate) → build → Trivy scan → publish. Registered in
+  `src/servicectl/templates.py`, the SDK's `TemplateId` union in
+  `src/sdk-ts/src/index.ts`, and the Go wrapper's `validTemplate` switch
+  in `src/servicectl-go/main.go`. Two new smoke tests
+  (`test_node_react_web_scaffolds`, `test_node_react_web_no_db_in_scaffold`)
+  cover file emission and a regression guard against accidentally shipping
+  DB deps in the frontend bundle.
+
+### Added
 - **`src/doctor-go/` — a Go sidecar validator.** Stdlib-only Go binary
   that mirrors a focused subset of `servicectl doctor` (file presence,
   Dockerfile multi-stage, CI workflow, plaintext-secret detection) with

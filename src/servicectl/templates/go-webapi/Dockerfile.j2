@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1.6
+#
+# Multi-stage build for {{ service_name }}.
+#   build  — golang:1.22 + CGO enabled (so we can vet with the race detector in CI)
+#   runtime — distroless static; nonroot; minimal attack surface
+#
+# This template is part of servicectl's go-webapi scaffold.
+# Edit as needed — every line is meant to be readable.
+
+FROM golang:1.22-bookworm AS build
+WORKDIR /src
+
+# Cache go.mod/go.sum first so dependency downloads don't bust on every code change.
+COPY go.mod go.sum* ./
+RUN go mod download
+
+# Now the source.
+COPY cmd ./cmd
+COPY internal ./internal
+
+# -trimpath  → reproducible builds (no absolute paths in the binary)
+# -ldflags   → strip debug info + set a build-time version
+# CGO_ENABLED=0 → static binary; runs on distroless with no libc dependency.
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build \
+        -trimpath \
+        -ldflags="-s -w -X main.version=${VERSION}" \
+        -o /out/{{ service_name }} \
+        ./cmd/server
+
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+WORKDIR /app
+
+COPY --from=build /out/{{ service_name }} /app/{{ service_name }}
+
+USER nonroot:nonroot
+EXPOSE 3000
+ENV PORT=3000
+
+ENTRYPOINT ["/app/{{ service_name }}"]

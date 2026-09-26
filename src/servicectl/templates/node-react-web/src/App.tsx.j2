@@ -1,0 +1,22 @@
+import { Route, Routes } from "react-router-dom";
+import Layout from "@/components/Layout";
+import HomePage from "@/pages/HomePage";
+import NotFoundPage from "@/pages/NotFoundPage";
+
+/**
+ * {{ service_name }} root component.
+ *
+ * Wires the layout shell around a couple of placeholder pages. Add yours
+ * by dropping new <Route> children between HomePage and the catch-all.
+ */
+export default function App() {
+  return (
+    <Routes>
+      <Route element={<Layout />}>
+        <Route index element={<HomePage />} />
+        {/* Add your real routes here. Catch-all stays last. */}
+        <Route path="*" element={<NotFoundPage />} />
+      </Route>
+    </Routes>
+  );
+}

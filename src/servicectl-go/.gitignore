@@ -1,0 +1,11 @@
+# Build artifacts.
+servicectl-go
+servicectl-go.exe
+*.test
+*.out
+
+# IDE / OS junk.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

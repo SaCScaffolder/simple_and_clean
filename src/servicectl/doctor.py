@@ -185,6 +185,242 @@ def _coverage_threshold(path: Path) -> tuple[bool, int | None, str]:
     return False, None, "no coverage threshold detected (checked pyproject.toml, package.json, CI workflow)"
 
 
+def _go_mod_go_version(path: Path) -> tuple[str | None, str]:
+    """Read the `go` directive from go.mod. Returns (version_str_or_None, raw_text).
+
+    Best-effort: extracts the first line matching `^go <version>`. Returns
+    (None, raw) when the file is missing/unreadable or no version declared.
+    """
+    text = _file_text(path)
+    if not text:
+        return None, ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("go ") and not line.startswith("go("):
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                return parts[1], text
+
+
+def _go_mod_module_path(path: Path) -> tuple[str | None, str]:
+    """Read the `module` directive from go.mod. Returns (module_or_None, raw_text).
+
+    The module path is the first non-comment, non-blank line that starts with
+    `module `. Returns (None, raw) when the file is missing/unreadable.
+    """
+    text = _file_text(path)
+    if not text:
+        return None, ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("//"):
+            continue
+        if line.startswith("module "):
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                return parts[1], text
+    return None, text
+
+
+def _has_go_test_files(path: Path) -> tuple[bool, str]:
+    """True if any *_test.go file exists under path (recursively)."""
+    matches = list(path.rglob("*_test.go"))
+    if matches:
+        return True, f"{len(matches)} *_test.go file(s) found"
+    return False, "no *_test.go files found"
+
+
+def _has_internal_go_package(path: Path) -> tuple[bool, str]:
+    """True if at least one `internal/<name>/*.go` package exists.
+
+    The go-webapi scaffold emits internal/<service_name_snake>/. This check
+    catches the case where someone deleted the package directory entirely
+    (the binary would still build with an empty `internal/`).
+    """
+    internal = path / "internal"
+    if not internal.exists():
+        return False, "no `internal/` directory"
+    go_pkgs = [d for d in internal.iterdir() if d.is_dir() and any(d.rglob("*.go"))]
+    if go_pkgs:
+        return True, f"`internal/` has {len(go_pkgs)} Go package(s): " + ", ".join(
+            sorted(d.name for d in go_pkgs)
+        )
+    return False, "`internal/` exists but contains no Go packages"
+
+
+def _ci_uses_go_race(path: Path) -> tuple[bool, str]:
+    """True if any CI workflow uses `go test ... -race`.
+
+    The go-webapi scaffold runs tests with `-race` by default; this check
+    catches accidental drops of the race detector after a workflow edit.
+    Looks for `go test` followed by `-race` (on the same logical command)
+    in either GitHub Actions or Azure DevOps pipelines.
+    """
+    candidates = [
+        path / ".github" / "workflows" / "ci.yml",
+        path / "azure-pipelines.yml",
+    ]
+    for c in candidates:
+        if not c.exists():
+            continue
+        text = _file_text(c)
+        # Look for "go test" near "-race". We accept either ordering and
+        # tolerate flags between them. A simple regex captures the common
+        # case; this is a coarse check.
+        import re as _re
+        if _re.search(r"go\s+test\b[^\n]*-race\b|-race\b[^\n]*go\s+test\b", text, flags=_re.IGNORECASE):
+            return True, f"`-race` detected in {c.name}"
+    return False, "no `-race` flag in `go test` invocations in CI"
+
+
+def _has_vendor_dir(path: Path) -> tuple[bool, str]:
+    """True if `vendor/` exists. We don't want vendored deps in a scaffolded service.
+
+    Vendoring is occasionally legitimate (offline builds, hermetic CI), so
+    this is info-level rather than warn. It exists to surface accidental
+    `go mod vendor` runs that should be reverted.
+    """
+    vendor = path / "vendor"
+    if vendor.exists() and vendor.is_dir():
+        return False, "vendor/ directory present — was `go mod vendor` intentional?"
+    return True, "no vendor/ directory (good — modules resolve at build time)"
+
+
+def _go_checks(service_path: Path) -> list[Check]:
+    """Run all Go-specific doctor checks. Caller gates on go.mod presence."""
+    checks: list[Check] = []
+
+    # go:cmd-server-exists — error if the conventional entrypoint is gone.
+    cmd_main = service_path / "cmd" / "server" / "main.go"
+    checks.append(Check(
+        name="go:cmd-server-exists",
+        severity=SEVERITY_ERROR,
+        passed=cmd_main.exists(),
+        message=(
+            "cmd/server/main.go — present"
+            if cmd_main.exists()
+            else "cmd/server/main.go — missing (the go-webapi scaffold emits this)"
+        ),
+        fix=(
+            ""
+            if cmd_main.exists()
+            else "regenerate with `servicectl init` --template=go-webapi or restore from source control"
+        ),
+    ))
+
+    # go:modfile — error if go.mod is missing entirely.
+    gomod = service_path / "go.mod"
+    mod_exists = gomod.exists()
+    checks.append(Check(
+        name="go:modfile",
+        severity=SEVERITY_ERROR,
+        passed=mod_exists,
+        message="go.mod — present" if mod_exists else "go.mod — missing",
+        fix="" if mod_exists else "regenerate with `servicectl init` --template=go-webapi",
+    ))
+
+    if mod_exists:
+        # go:modfile-go-version — warn if Go version is older than 1.22.
+        # The scaffold declares `go 1.22`; anything older is drift.
+        version, _raw = _go_mod_go_version(gomod)
+        version_ok = version is not None and _parse_go_minor(version) >= 22
+        checks.append(Check(
+            name="go:modfile-go-version",
+            severity=SEVERITY_WARN,
+            passed=version_ok,
+            message=(
+                f"go.mod declares go {version}"
+                if version is not None
+                else "go.mod has no `go` directive"
+            ),
+            fix=(
+                ""
+                if version_ok
+                else "bump `go 1.22` in go.mod to match the scaffold"
+            ),
+        ))
+
+        # go:modfile-module-path — info if module path is empty or still the
+        # scaffold's `github.com/henryorsborn/<service>` placeholder. We can't
+        # tell from the file alone whether the placeholder is intentional
+        # (you really are scaffolding a public module) or drift (you forgot
+        # to update after forking), so this is info rather than warn.
+        module, _raw = _go_mod_module_path(gomod)
+        module_ok = bool(module) and "henryorsborn" not in (module or "")
+        checks.append(Check(
+            name="go:modfile-module-path",
+            severity=SEVERITY_INFO,
+            passed=module_ok,
+            message=(
+                f"module {module}"
+                if module
+                else "no `module` directive in go.mod"
+            ),
+            fix=(
+                ""
+                if module_ok
+                else "update the `module` directive in go.mod to your real module path before publishing"
+            ),
+        ))
+
+    # go:has-internal-package — warn if no Go packages live under internal/.
+    pkg_ok, pkg_msg = _has_internal_go_package(service_path)
+    checks.append(Check(
+        name="go:has-internal-package",
+        severity=SEVERITY_WARN,
+        passed=pkg_ok,
+        message=pkg_msg,
+        fix="" if pkg_ok else "add at least one package under `internal/<service>/`",
+    ))
+
+    # go:has-tests — warn if no *_test.go files exist anywhere.
+    tests_ok, tests_msg = _has_go_test_files(service_path)
+    checks.append(Check(
+        name="go:has-tests",
+        severity=SEVERITY_WARN,
+        passed=tests_ok,
+        message=tests_msg,
+        fix="" if tests_ok else "add at least one `*_test.go` file (httptest works well for HTTP handlers)",
+    ))
+
+    # go:ci-uses-race — info; encourages keeping the race detector on.
+    race_ok, race_msg = _ci_uses_go_race(service_path)
+    checks.append(Check(
+        name="go:ci-uses-race",
+        severity=SEVERITY_INFO,
+        passed=race_ok,
+        message=race_msg,
+        fix=(
+            ""
+            if race_ok
+            else "add `-race` to `go test` in the CI workflow to catch data races"
+        ),
+    ))
+
+    # go:no-vendor-dir — info; surfaces accidental `go mod vendor` commits.
+    no_vendor_ok, no_vendor_msg = _has_vendor_dir(service_path)
+    checks.append(Check(
+        name="go:no-vendor-dir",
+        severity=SEVERITY_INFO,
+        passed=no_vendor_ok,
+        message=no_vendor_msg,
+        fix="" if no_vendor_ok else "remove the vendor/ directory if `go mod vendor` was unintentional",
+    ))
+
+    return checks
+
+
+def _parse_go_minor(version: str) -> int:
+    """Parse `1.22` or `1.22.0` into the minor version (22). Returns 0 on parse failure."""
+    parts = version.split(".")
+    if len(parts) < 2:
+        return 0
+    try:
+        return int(parts[1])
+    except (ValueError, IndexError):
+        return 0
+
+
 def run_checks(service_path: Path) -> DoctorReport:
     """Run all doctor checks against a service directory."""
     report = DoctorReport(
@@ -306,6 +542,15 @@ def run_checks(service_path: Path) -> DoctorReport:
                 message="present" if p.exists() else msg,
                 fix="" if p.exists() else fix,
             ))
+
+    # Go-specific checks. Run when the service *looks like* a Go service.
+    # Detection: presence of go.mod OR a cmd/server/main.go entrypoint.
+    # Either signal alone means "this is a Go-shaped service" and warrants
+    # the Go checks (including the ones that fire when go.mod is missing).
+    looks_like_go = (service_path / "go.mod").exists() or (service_path / "cmd" / "server" / "main.go").exists()
+    if looks_like_go:
+        for c in _go_checks(service_path):
+            report.checks.append(c)
 
     return report
 

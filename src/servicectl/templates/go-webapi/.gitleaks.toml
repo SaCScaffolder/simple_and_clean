@@ -1,0 +1,9 @@
+# gitleaks config — baseline so we don't trip on known-safe patterns.
+title = "{{ service_name }} gitleaks config"
+
+[allowlist]
+  description = "Allow example patterns from .env.example and README"
+  paths = [
+    '''\.env\.example$''',
+    '''README\.md$''',
+  ]

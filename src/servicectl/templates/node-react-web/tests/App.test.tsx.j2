@@ -1,0 +1,38 @@
+import { describe, expect, it } from "vitest";
+import { render, screen } from "@testing-library/react";
+import { createMemoryRouter, RouterProvider } from "react-router-dom";
+import App from "@/App";
+
+function renderApp(initialPath = "/") {
+  const router = createMemoryRouter(
+    [
+      {
+        path: "*",
+        element: <App />,
+      },
+    ],
+    { initialEntries: [initialPath] },
+  );
+  render(<RouterProvider router={router} />);
+}
+
+describe("{{ service_name }}", () => {
+  it("renders the home page on /", () => {
+    renderApp("/");
+    expect(
+      screen.getByRole("heading", { name: /welcome to/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the 404 page on an unknown route", () => {
+    renderApp("/this-route-does-not-exist");
+    expect(
+      screen.getByRole("heading", { name: /page not found/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the service name in the header", () => {
+    renderApp("/");
+    expect(screen.getAllByText("{{ service_name }}")[0]).toBeInTheDocument();
+  });
+});

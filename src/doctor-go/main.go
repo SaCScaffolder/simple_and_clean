@@ -24,8 +24,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 )
+
+// goTestRaceRegex matches a `go test` invocation that includes `-race`,
+// in either order (`go test ... -race ...` or `-race ... go test ...`).
+// Used by ciUsesGoRace to detect accidental drops of the race detector.
+var goTestRaceRegex = regexp.MustCompile(`go\s+test\b[^\n]*-race\b|-race\b[^\n]*go\s+test\b`)
 
 // Severity levels. Mirrors servicectl.doctor.
 const (
@@ -154,6 +162,14 @@ func Validate(path string) Report {
 	rep.Checks = append(rep.Checks, checkDockerfileMultiStage(path))
 	rep.Checks = append(rep.Checks, checkCIWorkflow(path))
 	rep.Checks = append(rep.Checks, checkNoPlaintextSecrets(path))
+
+	// Go-specific checks. Mirror of the Python doctor's _go_checks.
+	// Run when the service looks like a Go service (go.mod OR cmd/server/main.go).
+	if looksLikeGoService(path) {
+		for _, c := range goChecks(path) {
+			rep.Checks = append(rep.Checks, c)
+		}
+	}
 
 	rep.Summary = summarize(rep.Checks)
 	rep.ExitCode = rep.computeExitCode()
@@ -302,6 +318,265 @@ func inferDeployTarget(root string) string {
 		return "local"
 	}
 	return "unknown"
+}
+
+// ---------------------------------------------------------------------------
+// Go-specific checks. Mirror of servicectl.doctor._go_checks.
+// ---------------------------------------------------------------------------
+
+// looksLikeGoService returns true when the directory has go.mod or the
+// conventional cmd/server/main.go entrypoint. Either signal alone means
+// "this is a Go-shaped service" and warrants the Go checks.
+func looksLikeGoService(root string) bool {
+	return fileExists(filepath.Join(root, "go.mod")) ||
+		fileExists(filepath.Join(root, "cmd", "server", "main.go"))
+}
+
+// goChecks runs the Go-specific doctor checks. Mirrors _go_checks in the
+// Python doctor.
+func goChecks(root string) []Check {
+	var checks []Check
+
+	// go:cmd-server-exists — error if the conventional entrypoint is gone.
+	cmdMain := filepath.Join(root, "cmd", "server", "main.go")
+	cmdMainExists := fileExists(cmdMain)
+	checks = append(checks, Check{
+		Name:     "go:cmd-server-exists",
+		Severity: SeverityError,
+		Passed:   cmdMainExists,
+		Message:  ternary(cmdMainExists, "cmd/server/main.go — present", "cmd/server/main.go — missing (the go-webapi scaffold emits this)"),
+		Fix:      ternary(cmdMainExists, "", "regenerate with `servicectl init` --template=go-webapi or restore from source control"),
+	})
+
+	// go:modfile — error if go.mod is missing entirely.
+	gomod := filepath.Join(root, "go.mod")
+	modExists := fileExists(gomod)
+	checks = append(checks, Check{
+		Name:     "go:modfile",
+		Severity: SeverityError,
+		Passed:   modExists,
+		Message:  ternary(modExists, "go.mod — present", "go.mod — missing"),
+		Fix:      ternary(modExists, "", "regenerate with `servicectl init` --template=go-webapi"),
+	})
+
+	if modExists {
+		// go:modfile-go-version — warn if Go version is older than 1.22.
+		version, versionOK := readGoModGoVersion(gomod)
+		versionPasses := versionOK && parseGoMinor(version) >= 22
+		msg := "go.mod has no `go` directive"
+		if versionOK {
+			msg = "go.mod declares go " + version
+		}
+		checks = append(checks, Check{
+			Name:     "go:modfile-go-version",
+			Severity: SeverityWarn,
+			Passed:   versionPasses,
+			Message:  msg,
+			Fix:      ternary(versionPasses, "", "bump `go 1.22` in go.mod to match the scaffold"),
+		})
+
+		// go:modfile-module-path — info if module path is empty or still the
+		// scaffold's placeholder. We can't tell from the file alone whether
+		// the placeholder is intentional (you really are scaffolding a public
+		// module) or drift (you forgot to update after forking), so this is
+		// info rather than warn.
+		module, moduleOK := readGoModModulePath(gomod)
+		modulePasses := moduleOK && !strings.Contains(module, "henryorsborn")
+		moduleMsg := "no `module` directive in go.mod"
+		if moduleOK {
+			moduleMsg = "module " + module
+		}
+		checks = append(checks, Check{
+			Name:     "go:modfile-module-path",
+			Severity: SeverityInfo,
+			Passed:   modulePasses,
+			Message:  moduleMsg,
+			Fix:      ternary(modulePasses, "", "update the `module` directive in go.mod to your real module path before publishing"),
+		})
+	}
+
+	// go:has-internal-package — warn if no Go packages live under internal/.
+	pkgOK, pkgMsg := hasInternalGoPackage(root)
+	checks = append(checks, Check{
+		Name:     "go:has-internal-package",
+		Severity: SeverityWarn,
+		Passed:   pkgOK,
+		Message:  pkgMsg,
+		Fix:      ternary(pkgOK, "", "add at least one package under `internal/<service>/`"),
+	})
+
+	// go:has-tests — warn if no *_test.go files exist anywhere.
+	testsOK, testsMsg := hasGoTestFiles(root)
+	checks = append(checks, Check{
+		Name:     "go:has-tests",
+		Severity: SeverityWarn,
+		Passed:   testsOK,
+		Message:  testsMsg,
+		Fix:      ternary(testsOK, "", "add at least one `*_test.go` file (httptest works well for HTTP handlers)"),
+	})
+
+	// go:ci-uses-race — info; encourages keeping the race detector on.
+	raceOK, raceMsg := ciUsesGoRace(root)
+	checks = append(checks, Check{
+		Name:     "go:ci-uses-race",
+		Severity: SeverityInfo,
+		Passed:   raceOK,
+		Message:  raceMsg,
+		Fix:      ternary(raceOK, "", "add `-race` to `go test` in the CI workflow to catch data races"),
+	})
+
+	// go:no-vendor-dir — info; surfaces accidental `go mod vendor` commits.
+	noVendorOK, noVendorMsg := hasVendorDir(root)
+	checks = append(checks, Check{
+		Name:     "go:no-vendor-dir",
+		Severity: SeverityInfo,
+		Passed:   noVendorOK,
+		Message:  noVendorMsg,
+		Fix:      ternary(noVendorOK, "", "remove the vendor/ directory if `go mod vendor` was unintentional"),
+	})
+
+	return checks
+}
+
+// readGoModGoVersion returns the `go` directive value (e.g. "1.22") and true
+// on success. Returns "", false when the file is missing or has no go directive.
+func readGoModGoVersion(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "go ") && !strings.HasPrefix(line, "go(") {
+			parts := strings.Fields(line)
+			if len(parts) == 2 {
+				return parts[1], true
+			}
+		}
+	}
+	return "", false
+}
+
+// readGoModModulePath returns the `module` directive value and true on success.
+// Returns "", false when the file is missing or has no module directive.
+func readGoModModulePath(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "//") {
+			continue
+		}
+		if strings.HasPrefix(line, "module ") {
+			parts := strings.Fields(line)
+			if len(parts) == 2 {
+				return parts[1], true
+			}
+		}
+	}
+	return "", false
+}
+
+// parseGoMinor parses `1.22` or `1.22.0` into the minor version (22).
+// Returns 0 on parse failure.
+func parseGoMinor(version string) int {
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return 0
+	}
+	n, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// hasGoTestFiles returns true if any *_test.go file exists under root.
+func hasGoTestFiles(root string) (bool, string) {
+	count := 0
+	_ = filepath.Walk(root, func(_ string, info os.FileInfo, _ error) error {
+		if info == nil || info.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(info.Name(), "_test.go") {
+			count++
+		}
+		return nil
+	})
+	if count > 0 {
+		return true, fmt.Sprintf("%d *_test.go file(s) found", count)
+	}
+	return false, "no *_test.go files found"
+}
+
+// hasInternalGoPackage returns true if at least one `internal/<name>/*.go`
+// package exists.
+func hasInternalGoPackage(root string) (bool, string) {
+	internal := filepath.Join(root, "internal")
+	if !fileExists(internal) {
+		return false, "no `internal/` directory"
+	}
+	entries, err := os.ReadDir(internal)
+	if err != nil {
+		return false, "`internal/` exists but is unreadable"
+	}
+	var pkgNames []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pkgDir := filepath.Join(internal, e.Name())
+		matches, _ := filepath.Glob(filepath.Join(pkgDir, "*.go"))
+		if len(matches) > 0 {
+			pkgNames = append(pkgNames, e.Name())
+		}
+	}
+	if len(pkgNames) > 0 {
+		sort.Strings(pkgNames)
+		return true, fmt.Sprintf("`internal/` has %d Go package(s): %s", len(pkgNames), strings.Join(pkgNames, ", "))
+	}
+	return false, "`internal/` exists but contains no Go packages"
+}
+
+// ciUsesGoRace returns true if any CI workflow uses `go test ... -race`.
+func ciUsesGoRace(root string) (bool, string) {
+	candidates := []string{
+		filepath.Join(root, ".github", "workflows", "ci.yml"),
+		filepath.Join(root, "azure-pipelines.yml"),
+	}
+	for _, c := range candidates {
+		if !fileExists(c) {
+			continue
+		}
+		data, err := os.ReadFile(c)
+		if err != nil {
+			continue
+		}
+		text := string(data)
+		if goTestRaceRegex.MatchString(text) {
+			return true, fmt.Sprintf("`-race` detected in %s", filepath.Base(c))
+		}
+	}
+	return false, "no `-race` flag in `go test` invocations in CI"
+}
+
+// hasVendorDir returns true if no `vendor/` directory exists at root.
+func hasVendorDir(root string) (bool, string) {
+	vendor := filepath.Join(root, "vendor")
+	if info, err := os.Stat(vendor); err == nil && info.IsDir() {
+		return false, "vendor/ directory present — was `go mod vendor` intentional?"
+	}
+	return true, "no vendor/ directory (good — modules resolve at build time)"
+}
+
+// ternary is a tiny helper to keep check construction readable.
+func ternary(cond bool, a, b string) string {
+	if cond {
+		return a
+	}
+	return b
 }
 
 func summarize(checks []Check) Summary {

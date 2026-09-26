@@ -1,0 +1,47 @@
+export default function HomePage() {
+  return (
+    <section className="container py-12">
+      <h1 className="text-3xl font-semibold tracking-tight">
+        Welcome to {`{{ service_name }}`}
+      </h1>
+      <p className="mt-2 max-w-prose text-muted-foreground">
+        Vite + React + shadcn/ui + Tailwind, scaffolded by servicectl.
+        Replace this with your real landing page.
+      </p>
+
+      <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <a
+          href="https://vite.dev"
+          className="rounded-lg border p-4 transition hover:border-foreground"
+        >
+          <h2 className="font-medium">Vite</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Dev server with HMR; production build emits hashed assets.
+          </p>
+        </a>
+        <a
+          href="https://react.dev"
+          className="rounded-lg border p-4 transition hover:border-foreground"
+        >
+          <h2 className="font-medium">React 18</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Strict mode + Suspense ready. Hooks-only, no class components.
+          </p>
+        </a>
+        <a
+          href="https://ui.shadcn.com"
+          className="rounded-lg border p-4 transition hover:border-foreground"
+        >
+          <h2 className="font-medium">shadcn/ui</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Accessible primitives you copy into your repo. Add with{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-xs">
+              npx shadcn@latest add button
+            </code>
+            .
+          </p>
+        </a>
+      </div>
+    </section>
+  );
+}

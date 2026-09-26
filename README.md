@@ -23,7 +23,7 @@ services at Microsoft.
 ## Polyglot by design
 
 `servicectl` is a platform tool that emits services in multiple runtimes.
-The platform tooling itself reflects that reality — three language
+The platform tooling itself reflects that reality — four language
 subpackages under one umbrella, each using the right tool for its job:
 
 | Subpackage | Language | Purpose | Source of truth? |
@@ -31,6 +31,7 @@ subpackages under one umbrella, each using the right tool for its job:
 | [`src/servicectl/`](src/servicectl/) | Python | Scaffolder + full doctor | **Yes** |
 | [`src/doctor-go/`](src/doctor-go/) | Go | Fast-path validator (focused subset of doctor) | No — mirrors Python |
 | [`src/sdk-ts/`](src/sdk-ts/) | TypeScript | Typed wrapper around the CLI for chatops/CI/scripts | No — calls Python CLI |
+| [`src/servicectl-go/`](src/servicectl-go/) | Go | Typed wrapper around the CLI for Go scripts/CI | No — calls Python CLI |
 
 See [`src/PACKAGES.md`](src/PACKAGES.md) for the full layout and per-package
 development instructions.
@@ -121,8 +122,10 @@ When `--deploy=azure`, the overlay adds:
 ## Templates
 
 - **`node-express`** — Node.js 20 + Express + PostgreSQL, Jest + Supertest, ESLint
+- **`node-react-web`** — Node 20 + Vite + React 18 + TypeScript + Tailwind + shadcn/ui (SPA), nginx runtime, Vitest + Testing Library
 - **`python-flask`** — Python 3.12 + Flask + PostgreSQL, pytest + ruff
 - **`dotnet-webapi`** — .NET 8 Web API + PostgreSQL, xUnit + WebApplicationFactory
+- **`go-webapi`** — Go 1.22+ + net/http + PostgreSQL, stdlib testing + Trivy scan, distroless static runtime
 
 Adding a template is a `templates/<id>/` folder with `.j2` files where
 `{{ service_name }}`, `{{ service_name_pascal }}`, `{{ coverage_threshold }}`,
@@ -281,7 +284,8 @@ engineer can use in 60 seconds.
 - [ ] `--deploy=azure-container-apps` (full implementation, not just a placeholder)
 - [ ] `--template-dir=<path>` so users can extend without forking
 - [ ] `servicectl doctor` — validate an existing project against the same standards
-- [ ] Go template (`go-webapi`), Rust template (`rust-axum`), Java template (`spring-boot`)
+- [x] `go-webapi` template (`net/http`, distroless runtime, race-detector coverage gate) — shipped 2026-09-23
+- [ ] Rust template (`rust-axum`), Java template (`spring-boot`)
 - [ ] Pre-commit hook generator (gitleaks + ruff/eslint/dotnet format on commit)
 
 ## Contributing

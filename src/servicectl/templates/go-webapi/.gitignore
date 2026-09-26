@@ -1,0 +1,23 @@
+# Binaries / build artifacts
+/{{ service_name }}
+/{{ service_name }}.exe
+/bin/
+/dist/
+/build/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go workspace files (not common but just in case)
+go.work
+go.work.sum
+
+# Local env / IDE
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+*.log
+.DS_Store

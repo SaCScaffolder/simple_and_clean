@@ -1,0 +1,94 @@
+package {{ service_name_snake }}
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+// TestHealthz asserts /healthz returns 200 with the expected body.
+//
+// This is a smoke test — it should pass on any scaffold that's been
+// rendered correctly. If you change the handler, change this test too.
+func TestHealthz(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+
+	NewMux().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Fatalf("expected status=ok, got %q", body["status"])
+	}
+}
+
+// TestReadyz asserts /readyz returns 200 with the expected body.
+func TestReadyz(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+
+	NewMux().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+}
+
+// TestIndex asserts the index endpoint advertises the correct service name.
+func TestIndex(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	NewMux().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["service"] != "{{ service_name }}" {
+		t.Fatalf("expected service={{ service_name }}, got %q", body["service"])
+	}
+	if body["status"] != "running" {
+		t.Fatalf("expected status=running, got %q", body["status"])
+	}
+}
+
+// TestRoutesExist is a table-driven check that the scaffold's expected
+// routes are registered. Add new routes to the table when you add handlers.
+func TestRoutesExist(t *testing.T) {
+	srv := NewServer(nil)
+	mux := srv.Mux()
+
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/healthz"},
+		{http.MethodGet, "/readyz"},
+		{http.MethodGet, "/"},
+	}
+
+	for _, r := range routes {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(r.method, r.path, nil)
+		mux.ServeHTTP(rec, req)
+
+		// All routes should at least return 200 on a basic GET — we're
+		// not testing business logic here, only that the mux is wired up.
+		if rec.Code != http.StatusOK {
+			t.Errorf("route %s %s: expected 200, got %d", r.method, r.path, rec.Code)
+		}
+	}
+}

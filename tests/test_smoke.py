@@ -34,7 +34,7 @@ def _scaffold(tmp: Path, name: str, template: str, **overrides) -> Path:
 
 
 def test_all_templates_registered():
-    expected = {"node-express", "python-flask", "dotnet-webapi"}
+    expected = {"node-express", "node-react-web", "python-flask", "dotnet-webapi", "go-webapi"}
     assert set(list_templates()) == expected
 
 
@@ -68,6 +68,122 @@ def test_dotnet_pascal_cases_filename():
         assert (target / "DemoDotnet.csproj").exists()
         assert (target / "tests" / "DemoDotnet.Tests" / "DemoDotnet.Tests.csproj").exists()
         assert (target / "tests" / "DemoDotnet.Tests" / "UnitTest1.cs").exists()
+
+
+def test_go_webapi_scaffolds():
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-go", "go-webapi", coverage_threshold=85)
+        # Required static-ish files (some are .j2 but render to no-suffix names).
+        assert (target / "Dockerfile").exists()
+        assert (target / "docker-compose.dev.yml").exists()
+        assert (target / ".github" / "workflows" / "ci.yml").exists()
+        assert (target / "azure-pipelines.yml").exists()
+        assert (target / ".env.example").exists()
+        assert (target / "README.md").exists()
+        assert (target / ".gitleaks.toml").exists()
+        assert (target / ".dockerignore").exists()
+        assert (target / ".gitignore").exists()
+        # Go module + entrypoint + handler package.
+        assert (target / "go.mod").exists()
+        assert (target / "cmd" / "server" / "main.go").exists()
+        # Jinja-substituted snake_case directory.
+        assert (target / "internal" / "demo_go" / "server.go").exists()
+        assert (target / "internal" / "demo_go" / "server_test.go").exists()
+        # Substitution sanity: the service name should appear in the rendered files.
+        main = (target / "cmd" / "server" / "main.go").read_text()
+        assert "demo-go" in main
+        server = (target / "internal" / "demo_go" / "server.go").read_text()
+        assert "demo-go" in server
+        # go.mod module path should reflect the service name.
+        gomod = (target / "go.mod").read_text()
+        assert "demo-go" in gomod
+        # README should reference the coverage threshold.
+        readme = (target / "README.md").read_text()
+        assert "85%" in readme
+
+
+def test_go_webapi_dashed_name_substitutes_correctly():
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "billing.api", "go-webapi")
+        # snake_case for Go package paths.
+        assert (target / "internal" / "billing_api" / "server.go").exists()
+        assert (target / "internal" / "billing_api" / "server_test.go").exists()
+        # Service name should appear in main.go.
+        main = (target / "cmd" / "server" / "main.go").read_text()
+        assert "billing.api" in main
+
+
+def test_node_react_web_scaffolds():
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-react", "node-react-web", coverage_threshold=80)
+        # Build / scaffold-essential files (post-render, .j2 suffix stripped).
+        assert (target / "package.json").exists()
+        assert (target / "tsconfig.json").exists()
+        assert (target / "tsconfig.node.json").exists()
+        assert (target / "vite.config.ts").exists()
+        assert (target / "tailwind.config.ts").exists()
+        assert (target / "postcss.config.js").exists()
+        assert (target / "components.json").exists()
+        assert (target / "index.html").exists()
+        assert (target / "Dockerfile").exists()
+        assert (target / "nginx.conf").exists()
+        assert (target / ".env.example").exists()
+        assert (target / ".gitleaks.toml").exists()
+        assert (target / ".gitignore").exists()
+        assert (target / ".dockerignore").exists()
+        assert (target / "README.md").exists()
+        # CI workflows.
+        assert (target / ".github" / "workflows" / "ci.yml").exists()
+        assert (target / "azure-pipelines.yml").exists()
+        # src/ tree.
+        assert (target / "src" / "main.tsx").exists()
+        assert (target / "src" / "App.tsx").exists()
+        assert (target / "src" / "index.css").exists()
+        assert (target / "src" / "test-setup.ts").exists()
+        assert (target / "src" / "lib" / "utils.ts").exists()
+        assert (target / "src" / "components" / "Layout.tsx").exists()
+        assert (target / "src" / "components" / "ui" / "button.tsx").exists()
+        assert (target / "src" / "pages" / "HomePage.tsx").exists()
+        assert (target / "src" / "pages" / "NotFoundPage.tsx").exists()
+        assert (target / "src" / "api" / "client.ts").exists()
+        # tests/ tree.
+        assert (target / "tests" / "App.test.tsx").exists()
+        assert (target / "tests" / "utils.test.ts").exists()
+        # Service-name substitutions. Some files have UTF-8 characters
+        # (smart quotes, em dashes) so read with explicit encoding.
+        pkg = (target / "package.json").read_text(encoding="utf-8")
+        assert '"name": "demo-react"' in pkg
+        # main.tsx imports App but doesn't reference the name directly; verify the
+        # service name shows up in App.tsx, HomePage.tsx, and Layout.tsx instead.
+        for rel in ("src/App.tsx", "src/pages/HomePage.tsx", "src/components/Layout.tsx"):
+            text = (target / rel).read_text(encoding="utf-8")
+            assert "demo-react" in text, f"service name not substituted in {rel}"
+        # Coverage threshold should be in vite.config.ts.
+        vite = (target / "vite.config.ts").read_text(encoding="utf-8")
+        assert "lines: 80" in vite
+        # README mentions coverage.
+        readme = (target / "README.md").read_text(encoding="utf-8")
+        assert "80%" in readme
+
+
+def test_node_react_web_no_db_in_scaffold():
+    """A frontend SPA shouldn't ship Postgres / DB plumbing. This is a
+    regression guard against accidentally adding database deps to the
+    frontend template (which would inflate bundle size and confuse users)."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-react", "node-react-web")
+        pkg = (target / "package.json").read_text(encoding="utf-8")
+        # No pg, mysql, or other DB drivers in dependencies.
+        for db in ('"pg"', '"mysql"', '"mongodb"', '"sqlite3"', '"sequelize"', '"prisma"'):
+            assert db not in pkg, f"{db} should not appear in node-react-web deps"
+        # No POSTGRES_* in .env.example.
+        env_example = (target / ".env.example").read_text(encoding="utf-8")
+        assert "POSTGRES" not in env_example
+        # No docker-compose.dev.yml for an SPA (no service-to-service deps).
+        assert not (target / "docker-compose.dev.yml").exists(), (
+            "node-react-web is an SPA; docker-compose.dev.yml should not be "
+            "scaffolded (no companion services to run alongside)"
+        )
 
 
 def test_dashed_name_renders_correctly():

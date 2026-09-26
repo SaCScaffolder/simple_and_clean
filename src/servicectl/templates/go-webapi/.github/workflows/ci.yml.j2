@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_NAME: {{ image_name }}
+
+jobs:
+  test:
+    name: vet + test
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: {{ service_name }}_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: {{ service_name }}_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: go.sum
+      - name: go mod download
+        run: go mod download
+      - name: go vet
+        run: go vet ./...
+      - name: go test (with coverage)
+        run: |
+          go test ./... -count=1 -race -coverprofile=coverage.out -covermode=atomic
+          # Coverage gate. Adjust to taste; {{ coverage_threshold }}% is the default.
+          COVERAGE=$(go tool cover -func=coverage.out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
+          echo "total coverage: ${COVERAGE}%"
+          awk -v want={{ coverage_threshold }} -v got="$COVERAGE" 'BEGIN { if (got+0 < want+0) { exit 1 } }'
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  build:
+    name: build + scan
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: {% raw %}docker build -t $IMAGE_NAME:${{ github.sha }} .{% endraw %}
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: {% raw %}$IMAGE_NAME:${{ github.sha }}{% endraw %}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+{% if ci_provider == 'github-actions' %}
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: {% raw %}github.event_name == 'push' && github.ref == 'refs/heads/main'{% endraw %}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: {{ registry }}
+          username: {% raw %}${{ github.actor }}{% endraw %}
+          password: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
+      - name: Push image
+        run: |
+          {% raw %}docker tag $IMAGE_NAME:${{ github.sha }} $IMAGE_NAME:latest
+          docker push $IMAGE_NAME:${{ github.sha }}
+          docker push $IMAGE_NAME:latest{% endraw %}
+{% endif %}

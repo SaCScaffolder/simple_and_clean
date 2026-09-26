@@ -1,6 +1,6 @@
 # Subpackages
 
-This directory contains the three language subpackages that make up the
+This directory contains the four language subpackages that make up the
 `servicectl` platform stack. Each is independently buildable, tested, and
 documented; the Python CLI is the source of truth for scaffolding, and the
 Go and TypeScript packages are affordance layers on top of it.
@@ -9,7 +9,8 @@ Go and TypeScript packages are affordance layers on top of it.
 src/
 ├── servicectl/      Python CLI — the source of truth for scaffolding
 ├── doctor-go/       Go sidecar validator — fast focused subset of doctor
-└── sdk-ts/          TypeScript SDK — typed wrapper around the CLI
+├── sdk-ts/          TypeScript SDK — typed wrapper around the CLI
+└── servicectl-go/   Go wrapper CLI — typed wrapper around the CLI for Go scripts/CI
 ```
 
 ## Why a polyglot layout?
@@ -28,6 +29,10 @@ deliberate — each subpackage uses the right tool for its job:
 - **TypeScript** for the SDK. Platform teams that want to drive scaffolding
   from chatops bots, internal tools, or CI scripts need typed access. Reaching
   for `child_process` and parsing CLI output works once, then it doesn't.
+- **Go** for the wrapper CLI. Engineers who prefer Go for scripts, CI, or
+  chatops want a static binary that drives scaffolding the same way the
+  TypeScript SDK does for Node. Single-file stdlib-only, shells out to the
+  Python CLI.
 
 The Python CLI is the **source of truth**. The Go and TypeScript packages
 do NOT re-implement scaffolding or validation — they call into or mirror
@@ -61,6 +66,24 @@ go build -o doctor-go .             # build the binary
 
 See [./doctor-go/README.md](./doctor-go/README.md) for the full reference,
 exit codes, and CI integration examples.
+
+### `src/servicectl-go/` — Go wrapper CLI
+
+Toolchain: Go 1.22+.
+
+```bash
+cd src/servicectl-go
+go build -o servicectl-go .           # Linux / macOS
+go build -o servicectl-go.exe .       # Windows
+go test ./...                         # unit tests for splitName + validation helpers
+./servicectl-go init my-svc --template=go-webapi
+```
+
+See [`./servicectl-go/README.md`](./servicectl-go/README.md) for the full
+reference, all flags, examples, and the rationale. The wrapper is a thin
+shell-out to the Python CLI — it does **not** re-implement scaffolding.
+It's the *write* counterpart to `doctor-go` (which is the *validate*
+counterpart).
 
 ### `src/sdk-ts/` — TypeScript
 
@@ -99,9 +122,26 @@ If you add a new language subpackage:
 | File-presence checks | Both `servicectl.doctor` (full) and `doctor-go` (focused subset) |
 | Multi-stage Dockerfile detection | Both (mirror logic) |
 | Plaintext-secret detection | Both (`doctor-go` is coarse; Python doctor delegates to gitleaks in CI) |
-| CLI invocation from scripts/SDKs | `sdk-ts` |
-| Typed `ServiceConfig` shape | `sdk-ts` (mirror of Python CLI flags) |
+| CLI invocation from scripts/SDKs | `sdk-ts`, `servicectl-go` |
+| Typed `ServiceConfig` shape | `sdk-ts` (mirror of Python CLI flags), `servicectl-go` (mirror of Python CLI flags, Go struct) |
 | Exit-code semantics | Both (0=clean, 1=warn, 2=error) |
 
 If a rule changes in `servicectl.doctor`, update `doctor-go` to match (or
 document why it deliberately diverges). Don't let the rules drift silently.
+
+## Available templates (recap)
+
+The scaffolder currently ships five templates. The Python CLI is the
+source of truth for this list (see `src/servicectl/templates.py`); the
+TypeScript SDK and Go wrapper mirror it.
+
+| ID | Stack | Notes |
+|---|---|---|
+| `node-express` | Node.js 20 + Express + PostgreSQL | Backend. Ships docker-compose dev stack with Postgres. |
+| `node-react-web` | Node 20 + Vite + React + Tailwind + shadcn/ui | Frontend SPA. nginx runtime, no DB. |
+| `python-flask` | Python 3.12 + Flask + PostgreSQL | Backend. Ships docker-compose dev stack with Postgres. |
+| `dotnet-webapi` | .NET 8 Web API + PostgreSQL | Backend. Ships docker-compose dev stack with Postgres. |
+| `go-webapi` | Go 1.22+ + net/http + PostgreSQL | Backend. Distroless static runtime. |
+
+When adding a template, follow the recipe in
+[`../docs/development.md#adding-a-new-service-template`](../docs/development.md#adding-a-new-service-template).

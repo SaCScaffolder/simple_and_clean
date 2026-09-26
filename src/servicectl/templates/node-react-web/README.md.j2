@@ -1,0 +1,146 @@
+# {{ service_name }}
+
+> {{ template_description }} — scaffolded by [servicectl](https://github.com/henryorsborn/servicectl).
+
+A Vite + React 18 + TypeScript + Tailwind + shadcn/ui SPA with a multi-stage
+Docker build, nginx runtime, Vitest + Testing Library tests, and CI that
+runs lint → typecheck → test (with coverage gate) → Trivy scan → publish.
+
+## Quick start
+
+```bash
+npm install
+npm run dev          # vite dev server on http://localhost:5173
+```
+
+The dev server listens on `0.0.0.0:5173` so it works inside containers and
+remote dev environments. API requests to `/api/*` are proxied to
+`VITE_API_PROXY_TARGET` (defaults to `http://localhost:8080`) — set this
+in `.env`.
+
+## Scripts
+
+| Command | What it does |
+|---|---|
+| `npm run dev` | Vite dev server with HMR |
+| `npm run build` | Type-check then bundle for production into `dist/` |
+| `npm run preview` | Serve the production build locally on `:4173` |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run lint` | ESLint with zero-warning gate (`--max-warnings 0`) |
+| `npm test` | Vitest with coverage; fails below {{ coverage_threshold }}% |
+| `npm run test:watch` | Vitest in watch mode |
+
+## Layout
+
+```
+.
+├── src/
+│   ├── main.tsx               # entrypoint; mounts <App/> under StrictMode
+│   ├── App.tsx                # route table
+│   ├── index.css              # Tailwind base + shadcn CSS variables
+│   ├── test-setup.ts          # Vitest setup (jest-dom matchers)
+│   ├── lib/
+│   │   └── utils.ts           # cn() class-merger used by every primitive
+│   ├── components/
+│   │   ├── Layout.tsx         # app shell (header + main + footer)
+│   │   └── ui/
+│   │       └── button.tsx     # example shadcn primitive
+│   ├── pages/
+│   │   ├── HomePage.tsx
+│   │   └── NotFoundPage.tsx
+│   └── api/
+│       └── client.ts          # axios instance with base URL + interceptors
+├── tests/
+│   ├── App.test.tsx           # route smoke tests
+│   └── utils.test.ts          # cn() unit tests
+├── public/                    # static assets served as-is
+├── index.html                 # Vite HTML entry
+├── nginx.conf                 # SPA-friendly nginx config (production)
+├── Dockerfile                 # multi-stage: node build → nginx runtime
+├── docker-compose.dev.yml     # one-command dev stack
+├── .devcontainer/             # VS Code remote dev
+├── .github/workflows/ci.yml   # GitHub Actions
+├── azure-pipelines.yml        # Azure DevOps equivalent
+├── vite.config.ts             # Vite + dev proxy + Vitest config
+├── tailwind.config.ts         # Tailwind theme
+├── postcss.config.js
+├── components.json            # shadcn config
+├── tsconfig.json              # strict TS for src/
+├── tsconfig.node.json         # TS for vite.config.ts
+├── .env.example               # API URLs, no plaintext secrets
+└── .gitleaks.toml             # secrets scanning baseline
+```
+
+## CI
+
+Default CI runs on [{{ ci_provider }}]({{ 'https://github.com/features/actions' if ci_provider == 'github-actions' else 'https://azure.microsoft.com/en-us/products/devops/pipelines' }}). Each PR runs:
+
+1. **typecheck** — `tsc --noEmit`
+2. **lint** — `eslint . --max-warnings 0`
+3. **test** — Vitest with the configured coverage gate ({{ coverage_threshold }}%)
+4. **build** — multi-stage Docker build (node build → nginx runtime)
+5. **scan** — Trivy container scan; HIGH/CRITICAL = fail
+{% if ci_provider == 'github-actions' %}
+6. **publish** — on push to `main`, push image to {{ registry }}
+{% else %}
+6. **publish** — on push to `main`, push image to {{ registry }}
+{% endif %}
+
+## Adding shadcn primitives
+
+shadcn primitives are **copied into your repo** (not installed as an npm
+dependency) so you can customize them freely. To add another:
+
+```bash
+npx shadcn@latest add card
+npx shadcn@latest add dialog
+npx shadcn@latest add form
+```
+
+This drops a new `<primitive>.tsx` file into `src/components/ui/`. The
+`components.json` config file at the repo root drives the CLI's behavior.
+
+> ⚠️ Don't hand-edit `src/components/ui/*` expecting the CLI to preserve
+> your changes on regeneration — it won't. Customize by editing the file
+> once, then never re-run `npx shadcn add` for that primitive. To start
+> fresh, delete the file and re-add it.
+
+## Deployment
+
+{% if deploy_target == 'local' %}Local only for now (`docker compose up`). Cloud deploy flags coming next:
+`--deploy=azure`, `--deploy=aws`, `--deploy=gcp-cloud-run`.{% elif deploy_target == 'azure' %}Azure App Service (Linux, container). Files in `infra/`:
+- `infra/main.bicep` — ACR + App Service Plan + App Service + Postgres Flexible Server
+- `infra/dev.bicepparam`, `infra/staging.bicepparam`, `infra/prod.bicepparam` — env-specific parameters
+
+Deploy:
+```bash
+az login
+az bicep build --file infra/main.bicep --outfile infra/main.json
+az deployment group create --resource-group <rg> \
+    --template-file infra/main.bicep \
+    --parameters infra/dev.bicepparam
+```
+
+CD lives in `.github/workflows/deploy.yml` (push to `main` or manual dispatch).
+Required secrets:
+- `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_SUBSCRIPTION_ID` (OIDC federation)
+- `AZURE_RESOURCE_GROUP`{% elif deploy_target == 'azure-container-apps' %}Azure Container Apps. Deploy:
+```bash
+az login
+az containerapp up --source . --resource-group <rg> --environment <env>
+```{% endif %}
+
+## Secrets
+
+Never commit secrets. `.env.example` shows the required variables. CI
+runs [gitleaks](https://github.com/gitleaks/gitleaks) so accidental commits
+get caught before they hit `main`.
+
+The `VITE_API_BASE_URL` (and any other `VITE_*` variable) is **baked into
+the JS bundle at build time** by Vite. It's not a runtime secret — it's
+a public URL. Don't put real API keys here; put them in your backend's
+auth flow and proxy through `/api/*` paths.
+
+## License
+
+MIT.
