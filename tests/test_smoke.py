@@ -26,6 +26,7 @@ def _scaffold(tmp: Path, name: str, template: str, **overrides) -> Path:
         azure_region=overrides.get("azure_region", "eastus"),
         coverage_threshold=overrides.get("coverage_threshold", 80),
         registry=overrides.get("registry", "ghcr"),
+        db=overrides.get("db", "postgres"),
         output_dir=tmp,
         with_git=False,
         with_readme=True,
@@ -184,6 +185,134 @@ def test_node_react_web_no_db_in_scaffold():
             "node-react-web is an SPA; docker-compose.dev.yml should not be "
             "scaffolded (no companion services to run alongside)"
         )
+
+
+def test_db_default_is_postgres():
+    """If --db is not specified, the scaffold uses Postgres (preserves existing behavior)."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-py", "python-flask")
+        compose = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        assert "postgres:16-alpine" in compose
+        assert "POSTGRES_HOST" in compose
+        # MySQL-specific env vars must NOT be present when db is postgres.
+        assert "MYSQL_HOST" not in compose
+
+
+def test_db_mysql_emits_mysql_image_and_env():
+    """--db=mysql swaps the docker-compose image + env vars to MySQL."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-py", "python-flask", db="mysql")
+        compose = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        assert "mysql:8.0" in compose
+        assert "MYSQL_HOST" in compose
+        assert "MYSQL_DATABASE: demo-py" in compose
+        # Postgres-specific env vars must NOT be present.
+        assert "POSTGRES_HOST" not in compose
+        assert "postgres:16-alpine" not in compose
+
+
+def test_db_mssql_emits_mssql_image_and_env():
+    """--db=mssql swaps to Azure SQL Edge (the local-dev SQL Server)."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-py", "python-flask", db="mssql")
+        compose = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        assert "azure-sql-edge" in compose
+        assert "MSSQL_HOST" in compose
+        assert "MSSQL_DATABASE: demo-py" in compose
+        assert "POSTGRES_HOST" not in compose
+
+
+def test_db_cosmosdb_emits_emulator():
+    """--db=cosmosdb uses the Azure Cosmos DB Linux emulator (heavyweight)."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-py", "python-flask", db="cosmosdb")
+        compose = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        assert "azure-cosmos-emulator" in compose
+        assert "COSMOS_ENDPOINT" in compose
+        assert "COSMOS_DATABASE: demo-py" in compose
+        # None of the SQL flavors' env vars should be present.
+        assert "POSTGRES_HOST" not in compose
+        assert "MYSQL_HOST" not in compose
+        assert "MSSQL_HOST" not in compose
+
+
+def test_db_dotnet_uses_correct_connection_string_key():
+    """dotnet-webapi uses ASP.NET-style ConnectionStrings__<DB> env vars per flavor."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-dotnet", "dotnet-webapi", db="mssql")
+        compose = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        assert "ConnectionStrings__SqlServer" in compose
+        assert "Server=mssql" in compose
+        # Postgres connection-string key must NOT be present.
+        assert "ConnectionStrings__Postgres" not in compose
+
+
+def test_db_go_webapi_supports_all_flavors():
+    """The Go template's docker-compose branches on --db for all 4 flavors."""
+    for db_flavor in ("postgres", "mysql", "mssql", "cosmosdb"):
+        with tempfile.TemporaryDirectory() as td:
+            target = _scaffold(Path(td), "demo-go", "go-webapi", db=db_flavor)
+            compose = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+            # Each flavor has its own prefix; verify the active one is present
+            # and the others are not (catches accidental cross-pollination).
+            prefix_map = {
+                "postgres": "POSTGRES_HOST",
+                "mysql": "MYSQL_HOST",
+                "mssql": "MSSQL_HOST",
+                "cosmosdb": "COSMOS_ENDPOINT",
+            }
+            active = prefix_map[db_flavor]
+            assert active in compose, f"{db_flavor}: expected {active} in compose"
+            for other_prefix in prefix_map.values():
+                if other_prefix == active:
+                    continue
+                assert other_prefix not in compose, (
+                    f"{db_flavor}: {other_prefix} should not be present when --db={db_flavor}"
+                )
+
+
+def test_azure_overlay_emits_db_param_in_bicepparam():
+    """--deploy=azure --db=<flavor> sets the db param in the bicepparam files."""
+    for db_flavor in ("postgres", "mysql", "mssql", "cosmosdb"):
+        with tempfile.TemporaryDirectory() as td:
+            target = _scaffold(
+                Path(td),
+                "demo-svc",
+                "python-flask",
+                deploy_target="azure",
+                db=db_flavor,
+            )
+            for env in ("dev", "staging", "prod"):
+                bicepparam = (target / "infra" / f"{env}.bicepparam").read_text(encoding="utf-8")
+                assert f"param db = '{db_flavor}'" in bicepparam, (
+                    f"db={db_flavor} missing param in {env}.bicepparam"
+                )
+
+
+def test_azure_bicep_uses_conditional_resource_blocks():
+    """--deploy=azure --db=<flavor> emits the right conditional resource blocks in main.bicep."""
+    with tempfile.TemporaryDirectory() as td:
+        # Postgres-only block: postgresDb should be conditional on db == 'postgres'.
+        target = _scaffold(
+            Path(td), "demo-pg", "python-flask", deploy_target="azure", db="postgres"
+        )
+        bicep = (target / "infra" / "main.bicep").read_text(encoding="utf-8")
+        assert "if (db == 'postgres')" in bicep
+        # Cosmos-only block should also be conditional (not deployed when db=postgres).
+        assert "if (db == 'cosmosdb')" in bicep
+        # Cosmos's autoscaleThroughput param should be declared.
+        assert "param cosmosDbThroughput int" in bicep
+
+
+def test_db_validation_rejects_unknown_flavor():
+    """Passing an unknown --db value should raise ScaffoldError at scaffold time."""
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            _scaffold(Path(td), "demo-bad", "python-flask", db="oracle")
+        except ScaffoldError as e:
+            assert "unsupported --db" in str(e)
+        else:
+            raise AssertionError("expected ScaffoldError for unknown --db value")
 
 
 def test_dashed_name_renders_correctly():

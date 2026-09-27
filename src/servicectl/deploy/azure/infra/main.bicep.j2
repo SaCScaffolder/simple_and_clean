@@ -10,6 +10,12 @@
 //       --resource-group <your-resource-group> \
 //       --template-file infra/main.bicep \
 //       --parameters infra/dev.bicepparam
+//
+// Database backend is parameterized via `db`:
+//   - postgres  -> Microsoft.DBforPostgreSQL/flexibleServers
+//   - mysql     -> Microsoft.DBforMySQL/flexibleServers
+//   - mssql     -> Microsoft.Sql/servers + databases (Azure SQL)
+//   - cosmosdb  -> Microsoft.DocumentDB/databaseAccounts (Azure Cosmos DB)
 // =========================================================================
 
 @description('Azure region for all resources.')
@@ -25,22 +31,38 @@ param environment string = 'dev'
 @description('Container image to deploy (e.g. {{ registry }}/{{ service_name }}:v1.0.0).')
 param imageName string = '{{ registry }}/{{ service_name }}:latest'
 
-@description('PostgreSQL administrator login.')
-param postgresAdminLogin string = 'pgadmin'
+@description('Database backend to deploy.')
+@allowed(['postgres', 'mysql', 'mssql', 'cosmosdb'])
+param db string = '{{ db }}'
 
-@description('PostgreSQL administrator password. Use Key Vault references in prod.')
+@description('Database administrator login (postgres/mysql/mssql only; ignored for cosmosdb).')
+param dbAdminLogin string = 'dbadmin'
+
+@description('Database administrator password. Use Key Vault references in prod.')
 // To pass a secret at deploy time without committing it, use either:
-//   az deployment group create ... --parameters postgresAdminPassword="@Microsoft.KeyVault(VaultName=...;SecretName=...)"
-//   or fetch from a CI secret: --parameters postgresAdminPassword="$(az keyvault secret show ... --query value -o tsv)"
+//   az deployment group create ... --parameters dbAdminPassword="@Microsoft.KeyVault(VaultName=...;SecretName=...)"
+//   or fetch from a CI secret: --parameters dbAdminPassword="$(az keyvault secret show ... --query value -o tsv)"
 @secure()
-param postgresAdminPassword string
+param dbAdminPassword string
 
 @description('SKU for App Service Plan.')
 param appServicePlanSku string = 'B1'
 
-@description('SKU for PostgreSQL Flexible Server.')
+@description('SKU for PostgreSQL Flexible Server (postgres only).')
 @allowed(['B20ms', 'B30ms', 'B40ms', 'B50ms', 'B60ms', 'B80ms', 'B100ms'])
 param postgresSku string = 'B20ms'
+
+@description('SKU for MySQL Flexible Server (mysql only).')
+@allowed(['B1ms', 'B2ms', 'B4ms', 'B8ms', 'B12ms', 'B16ms', 'B20ms'])
+param mysqlSku string = 'B1ms'
+
+@description('SKU for Azure SQL Database (mssql only).')
+@allowed(['Basic', 'S0', 'S1', 'S2', 'S3', 'P1', 'P2', 'P4'])
+param sqlDbSku string = 'Basic'
+
+@description('Throughput for Azure Cosmos DB account (cosmosdb only).')
+@allowed([400, 1000, 2500, 10000])
+param cosmosDbThroughput int = 400
 
 @description('SKU for the Container Registry.')
 @allowed(['Basic', 'Standard', 'Premium'])
@@ -82,6 +104,69 @@ resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
 
 // ---- App Service (Linux, container) ------------------------------------
 
+// Build the App Service appSettings list conditionally so only the chosen
+// database's connection-string env vars are emitted. Cosmos uses a single
+// connection string; the SQL flavors use host/port/db/user/password.
+var appSettings = db == 'cosmosdb' ? [
+  {
+    name: 'WEBSITES_PORT'
+    value: '3000'
+  }
+  {
+    name: 'COSMOS_ENDPOINT'
+    value: cosmosAccount.properties.documentEndpoint
+  }
+  {
+    name: 'COSMOS_KEY'
+    value: listKeys(cosmosAccount.id, cosmosAccount.apiVersion).primaryMasterKey
+  }
+  {
+    name: 'COSMOS_DATABASE'
+    value: '{{ service_name_snake }}'
+  }
+  {
+    name: 'DOCKER_REGISTRY_SERVER_URL'
+    value: 'https://${acr.properties.loginServer}'
+  }
+  {
+    name: 'WEBSITES_ENABLE_APP_SERVICE_STORAGE'
+    value: 'false'
+  }
+] : [
+  {
+    name: 'WEBSITES_PORT'
+    value: '3000'
+  }
+  {
+    name: 'POSTGRES_HOST'
+    value: postgresDb.properties.fullyQualifiedDomainName
+  }
+  {
+    name: 'POSTGRES_PORT'
+    value: '5432'
+  }
+  {
+    name: 'POSTGRES_DB'
+    value: '{{ service_name_snake }}'
+  }
+  {
+    name: 'POSTGRES_USER'
+    value: dbAdminLogin
+  }
+  {
+    name: 'POSTGRES_PASSWORD'
+    value: dbAdminPassword
+  }
+  {
+    name: 'DOCKER_REGISTRY_SERVER_URL'
+    value: 'https://${acr.properties.loginServer}'
+  }
+  {
+    name: 'WEBSITES_ENABLE_APP_SERVICE_STORAGE'
+    value: 'false'
+  }
+]
+
 resource webApp 'Microsoft.Web/sites@2023-12-01' = {
   name: '${prefix}-app'
   location: location
@@ -100,40 +185,7 @@ resource webApp 'Microsoft.Web/sites@2023-12-01' = {
       minTlsVersion: '1.2'
       http20Enabled: true
       healthCheckPath: '/healthz'
-      appSettings: [
-        {
-          name: 'WEBSITES_PORT'
-          value: '3000'
-        }
-        {
-          name: 'POSTGRES_HOST'
-          value: postgresDb.properties.fullyQualifiedDomainName
-        }
-        {
-          name: 'POSTGRES_PORT'
-          value: '5432'
-        }
-        {
-          name: 'POSTGRES_DB'
-          value: '{{ service_name_snake }}'
-        }
-        {
-          name: 'POSTGRES_USER'
-          value: postgresAdminLogin
-        }
-        {
-          name: 'POSTGRES_PASSWORD'
-          value: postgresAdminPassword
-        }
-        {
-          name: 'DOCKER_REGISTRY_SERVER_URL'
-          value: 'https://${acr.properties.loginServer}'
-        }
-        {
-          name: 'WEBSITES_ENABLE_APP_SERVICE_STORAGE'
-          value: 'false'
-        }
-      ]
+      appSettings: appSettings
     }
   }
 }
@@ -152,9 +204,9 @@ resource acrPullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-// ---- PostgreSQL Flexible Server -----------------------------------------
+// ---- PostgreSQL Flexible Server (postgres only) ------------------------
 
-resource postgresDb 'Microsoft.DBforPostgreSQL/flexibleServers@2023-12-01-preview' = {
+resource postgresDb 'Microsoft.DBforPostgreSQL/flexibleServers@2023-12-01-preview' = if (db == 'postgres') {
   name: toLower('${prefix}-psql-${take(suffix, 4)}')
   location: location
   sku: {
@@ -162,8 +214,8 @@ resource postgresDb 'Microsoft.DBforPostgreSQL/flexibleServers@2023-12-01-previe
     tier: 'Burstable'
   }
   properties: {
-    administratorLogin: postgresAdminLogin
-    administratorLoginPassword: postgresAdminPassword
+    administratorLogin: dbAdminLogin
+    administratorLoginPassword: dbAdminPassword
     version: '16'
     storage: {
       storageSizeGB: 32
@@ -179,14 +231,12 @@ resource postgresDb 'Microsoft.DBforPostgreSQL/flexibleServers@2023-12-01-previe
   }
 }
 
-resource postgresDbDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2023-12-01-preview' = {
+resource postgresDbDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2023-12-01-preview' = if (db == 'postgres') {
   parent: postgresDb
   name: '{{ service_name_snake }}'
 }
 
-// Optional: only allow Azure services + your office IP for dev convenience.
-// In prod, replace with VNet integration + private endpoint.
-resource postgresFirewallAllowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-12-01-preview' = {
+resource postgresFirewallAllowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-12-01-preview' = if (db == 'postgres') {
   parent: postgresDb
   name: 'AllowAzureServices'
   properties: {
@@ -195,10 +245,150 @@ resource postgresFirewallAllowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/f
   }
 }
 
+// ---- MySQL Flexible Server (mysql only) --------------------------------
+
+resource mysqlDb 'Microsoft.DBforMySQL/flexibleServers@2023-12-01-preview' = if (db == 'mysql') {
+  name: toLower('${prefix}-mysql-${take(suffix, 4)}')
+  location: location
+  sku: {
+    name: mysqlSku
+    tier: 'Burstable'
+  }
+  properties: {
+    administratorLogin: dbAdminLogin
+    administratorLoginPassword: dbAdminPassword
+    version: '8.0.21'
+    storage: {
+      storageSizeGB: 32
+      iops: 500
+    }
+    backup: {
+      backupRetentionDays: environment == 'prod' ? 35 : 7
+      geoRedundantBackup: environment == 'prod' ? 'Enabled' : 'Disabled'
+    }
+    highAvailability: {
+      mode: environment == 'prod' ? 'ZoneRedundant' : 'Disabled'
+    }
+  }
+}
+
+resource mysqlDbDatabase 'Microsoft.DBforMySQL/flexibleServers/databases@2023-12-01-preview' = if (db == 'mysql') {
+  parent: mysqlDb
+  name: '{{ service_name_snake }}'
+}
+
+resource mysqlFirewallAllowAzure 'Microsoft.DBforMySQL/flexibleServers/firewallRules@2023-12-01-preview' = if (db == 'mysql') {
+  parent: mysqlDb
+  name: 'AllowAzureServices'
+  properties: {
+    startIpAddress: '0.0.0.0'
+    endIpAddress: '0.0.0.0'
+  }
+}
+
+// ---- Azure SQL Database (mssql only) -----------------------------------
+
+resource sqlServer 'Microsoft.Sql/servers@2023-05-01-preview' = if (db == 'mssql') {
+  name: toLower('${prefix}-sql-${take(suffix, 4)}')
+  location: location
+  properties: {
+    administratorLogin: dbAdminLogin
+    administratorLoginPassword: dbAdminPassword
+    version: '12.0'
+    publicNetworkAccess: 'Enabled'
+    minimalTlsVersion: '1.2'
+  }
+}
+
+resource sqlDb 'Microsoft.Sql/servers/databases@2023-05-01-preview' = if (db == 'mssql') {
+  parent: sqlServer
+  name: '{{ service_name_snake }}'
+  location: location
+  sku: {
+    name: sqlDbSku
+    tier: sqlDbSku == 'Basic' ? 'Basic' : 'Standard'
+  }
+  properties: {
+    collation: 'SQL_Latin1_General_CP1_CI_AS'
+    catalogCollation: 'SQL_Latin1_General_CP1_CI_AS'
+    maxSizeBytes: string(2 * 1024 * 1024 * 1024)  // 2 GB
+  }
+}
+
+resource sqlFirewallAllowAzure 'Microsoft.Sql/servers/firewallRules@2023-05-01-preview' = if (db == 'mssql') {
+  parent: sqlServer
+  name: 'AllowAzureServices'
+  properties: {
+    startIpAddress: '0.0.0.0'
+    endIpAddress: '0.0.0.0'
+  }
+}
+
+// ---- Azure Cosmos DB account (cosmosdb only) --------------------------
+
+resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = if (db == 'cosmosdb') {
+  name: toLower('${prefix}-cosmos-${take(suffix, 4)}')
+  location: location
+  kind: 'GlobalDocumentDB'
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    databaseAccountOfferType: 'Standard'
+    consistencyPolicy: {
+      defaultConsistencyLevel: 'Session'
+    }
+    locations: [
+      {
+        locationName: location
+        failoverPriority: 0
+        isZoneRedundant: environment == 'prod'
+      }
+    ]
+    capabilities: []
+    enableAutomaticFailover: environment == 'prod'
+    disableLocalAuth: false
+    minimalTlsVersion: 'Tls12'
+  }
+}
+
+resource cosmosDb 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2024-05-15' = if (db == 'cosmosdb') {
+  parent: cosmosAccount
+  name: '{{ service_name_snake }}'
+  properties: {
+    resource: {
+      id: '{{ service_name_snake }}'
+    }
+    options: {
+      autoscaleSettings: {
+        maxThroughput: cosmosDbThroughput
+      }
+    }
+  }
+}
+
+resource cosmosContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = if (db == 'cosmosdb') {
+  parent: cosmosDb
+  name: 'items'
+  properties: {
+    resource: {
+      id: 'items'
+      partitionKey: {
+        paths: [
+          '/id'
+        ]
+        kind: 'Hash'
+      }
+      defaultTtl: 7776000  // 90 days
+    }
+  }
+}
+
 // ---- Outputs ------------------------------------------------------------
 
 output webAppName string = webApp.name
 output webAppDefaultHostname string = webApp.properties.defaultHostName
 output acrLoginServer string = acr.properties.loginServer
-output postgresFqdn string = postgresDb.properties.fullyQualifiedDomainName
 output webAppPrincipalId string = webApp.identity.principalId
+output db string = db
+output dbFqdn string = db == 'postgres' ? postgresDb.properties.fullyQualifiedDomainName : (db == 'mysql' ? mysqlDb.properties.fullyQualifiedDomainName : (db == 'mssql' ? sqlServer.properties.fullyQualifiedDomainName : cosmosAccount.properties.documentEndpoint))

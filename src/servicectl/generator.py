@@ -15,6 +15,36 @@ from .templates import get_template_description, list_templates, template_path
 # Files we never want to copy through (even if a template includes them).
 _IGNORED_NAMES = {".DS_Store", "Thumbs.db", "__init__.py", "__pycache__"}
 
+# Database flavors supported by --db. Each entry maps a flag value to the
+# Azure resource type and the local-dev Docker image so the templates can
+# branch on a single source of truth.
+SUPPORTED_DBS: dict[str, dict[str, str]] = {
+    "postgres": {
+        "azure_resource_type": "Microsoft.DBforPostgreSQL/flexibleServers",
+        "docker_image": "postgres:16-alpine",
+        "env_prefix": "POSTGRES",
+        "healthcheck_cmd": "pg_isready -U postgres",
+    },
+    "mysql": {
+        "azure_resource_type": "Microsoft.DBforMySQL/flexibleServers",
+        "docker_image": "mysql:8.0",
+        "env_prefix": "MYSQL",
+        "healthcheck_cmd": "mysqladmin ping -h localhost -u root -proot",
+    },
+    "mssql": {
+        "azure_resource_type": "Microsoft.Sql/servers/databases",
+        "docker_image": "mcr.microsoft.com/azure-sql-edge:latest",
+        "env_prefix": "MSSQL",
+        "healthcheck_cmd": "/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P 'Password!@#' -Q 'SELECT 1' || exit 1",
+    },
+    "cosmosdb": {
+        "azure_resource_type": "Microsoft.DocumentDB/databaseAccounts",
+        "docker_image": "mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest",
+        "env_prefix": "COSMOS",
+        "healthcheck_cmd": "curl -fk https://localhost:8081/_explorer/index.html || exit 1",
+    },
+}
+
 
 class ScaffoldError(RuntimeError):
     """Raised when scaffolding fails for a recoverable reason."""
@@ -29,6 +59,7 @@ class ServiceGenerator:
     azure_region: str
     coverage_threshold: int
     registry: str
+    db: str
     output_dir: Path
     with_git: bool
     with_readme: bool
@@ -45,12 +76,15 @@ class ServiceGenerator:
             raise ScaffoldError(f"unknown template: {self.template!r}")
         if self.deploy_target not in {"local", "azure"}:
             raise ScaffoldError(f"unknown deploy target: {self.deploy_target!r}")
+        if self.db not in SUPPORTED_DBS:
+            raise ScaffoldError(f"unsupported --db: {self.db!r} (allowed: {sorted(SUPPORTED_DBS)})")
         # Make sure we don't overwrite an existing directory.
         target = (self.output_dir / self.name).resolve()
         if target.exists():
             raise ScaffoldError(f"target directory already exists: {target}")
 
     def _render_context(self) -> dict[str, object]:
+        db_meta = SUPPORTED_DBS[self.db]
         return {
             "service_name": self.name,
             "service_name_snake": self.name.replace("-", "_").replace(".", "_"),
@@ -62,6 +96,11 @@ class ServiceGenerator:
             "azure_region": self.azure_region,
             "coverage_threshold": self.coverage_threshold,
             "registry": self.registry,
+            "db": self.db,
+            "db_azure_resource_type": db_meta["azure_resource_type"],
+            "db_docker_image": db_meta["docker_image"],
+            "db_env_prefix": db_meta["env_prefix"],
+            "db_healthcheck_cmd": db_meta["healthcheck_cmd"],
             "image_name": f"{self.registry}/{self.name}",
         }
 

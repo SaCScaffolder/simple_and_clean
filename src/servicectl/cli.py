@@ -104,6 +104,14 @@ def main() -> None:
     help="Container registry.",
 )
 @click.option(
+    "--db",
+    "db",
+    type=click.Choice(["postgres", "mysql", "mssql", "cosmosdb"], case_sensitive=False),
+    default="postgres",
+    show_default=True,
+    help="Database backend (postgres = PostgreSQL Flexible Server, mysql = Azure Database for MySQL Flexible Server, mssql = Azure SQL Database, cosmosdb = Azure Cosmos DB).",
+)
+@click.option(
     "--output-dir",
     "output_dir",
     type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
@@ -121,6 +129,7 @@ def init(
     azure_region: str,
     coverage_threshold: int,
     registry: str,
+    db: str,
     output_dir: Path,
     no_git: bool,
     no_readme: bool,
@@ -135,6 +144,7 @@ def init(
             azure_region=azure_region,
             coverage_threshold=coverage_threshold,
             registry=registry,
+            db=db,
             output_dir=output_dir,
             with_git=not no_git,
             with_readme=not no_readme,
@@ -168,7 +178,8 @@ def init(
             + (f" ({azure_region})" if deploy_target.startswith("azure") else "")
             + f"\n"
             f"  coverage:    {coverage_threshold}%\n"
-            f"  registry:    {registry}\n\n"
+            f"  registry:    {registry}\n"
+            f"  db:          {db}\n\n"
             f"[bold]Next steps:[/bold]\n"
             f"  cd {name}\n"
             + ("" if no_git else f"  git add . && git commit -m \"feat: scaffold service\"\n  git remote add origin <your-repo-url>\n  git push -u origin main\n")

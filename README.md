@@ -140,6 +140,36 @@ etc. get substituted. PRs welcome.
 
 ---
 
+## Database backends
+
+The `--db` flag controls both the local dev docker-compose image and the
+Azure deploy's database resource type. Default is `postgres` (preserves
+existing behavior; no breaking change for current users).
+
+| `--db` | Local dev image | Azure resource |
+|---|---|---|
+| `postgres` (default) | `postgres:16-alpine` | Microsoft.DBforPostgreSQL/flexibleServers |
+| `mysql` | `mysql:8.0` | Microsoft.DBforMySQL/flexibleServers |
+| `mssql` | `mcr.microsoft.com/azure-sql-edge:latest` | Microsoft.Sql/servers + databases |
+| `cosmosdb` | `mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest` | Microsoft.DocumentDB/databaseAccounts |
+
+**Local dev notes:**
+- The Postgres, MySQL, and MSSQL flavors are lightweight (~50MB images).
+- The Cosmos DB emulator is heavyweight (~3GB memory, 30s+ start time).
+  For teams that need real Cosmos locally, run the emulator once per
+  dev machine; don't `docker compose up` it on every test run.
+
+**Azure deploy notes:**
+- `main.bicep` uses conditional resource blocks; only the chosen DB's
+  resource type deploys. The other three are skipped.
+- App Service `appSettings` include the right connection-string env vars
+  per flavor (Postgres uses host/port/db/user/password; MSSQL uses
+  `ConnectionStrings__SqlServer`; Cosmos uses endpoint + account key).
+- Each `infra/{dev,staging,prod}.bicepparam` passes SKU params for all 4
+  flavors. Bicep ignores params not relevant to the chosen `--db`.
+
+---
+
 ## Install
 
 ```bash
@@ -223,12 +253,13 @@ summary: 12/17 passed; 0 errors, 1 warning, 0 info
 
 ```
 servicectl init <name>
-  --template=<node-express|python-flask|dotnet-webapi>      [required]
+  --template=<node-express|node-react-web|python-flask|dotnet-webapi|go-webapi>      [required]
   --ci=<github-actions|azure-devops>                        [default: github-actions]
-  --deploy=<local|azure|azure-container-apps>              [default: local]
+  --deploy=<local|azure>                                   [default: local]
   --azure-region=<region>                                   [default: eastus]
   --coverage=<0-100>                                        [default: 80]
   --registry=<dockerhub|ghcr|ecr|acr|gcr>                   [default: ghcr]
+  --db=<postgres|mysql|mssql|cosmosdb>                     [default: postgres]
   --output-dir=<path>                                       [default: .]
   --no-git                                                  skip `git init`
   --no-readme                                               skip README generation

@@ -69,7 +69,8 @@ servicectl init billing-api \
     --deploy=azure \
     --azure-region=centralus \
     --coverage=90 \
-    --registry=acr
+    --registry=acr \
+    --db=mysql
 
 # Skip git init / README generation
 servicectl init scratch --template=python-flask --no-git --no-readme

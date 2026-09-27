@@ -7,6 +7,48 @@ All notable changes to `servicectl` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`--db` flag for database backend selection.** New `servicectl init` flag
+  selects the database flavor for both local dev (docker-compose) and
+  Azure deploy (Bicep). Supported values: `postgres` (default,
+  Azure Database for PostgreSQL Flexible Server), `mysql` (Azure Database
+  for MySQL Flexible Server), `mssql` (Azure SQL Database), `cosmosdb`
+  (Azure Cosmos DB with SQL API).
+  - Local dev: each template's `docker-compose.dev.yml` branches on `db`
+    and emits the right Docker image, env var prefix, and healthcheck.
+    Cosmos uses the Azure Cosmos DB Linux emulator (heavyweight: ~3GB
+    memory, 30s+ start time).
+  - Azure deploy: `infra/main.bicep` now uses conditional resource blocks.
+    Only the chosen DB's resource type deploys (Postgres Flexible Server,
+    MySQL Flexible Server, SQL Server + database, or Cosmos DB account).
+    App Service appSettings include the right connection-string env vars
+    per flavor.
+  - SKU params in `infra/{dev,staging,prod}.bicepparam` cover all 4 flavors;
+    Bicep ignores the ones not relevant to the chosen `--db`.
+- **9 new smoke tests** cover the `--db` flag:
+  `test_db_default_is_postgres`, `test_db_mysql_emits_mysql_image_and_env`,
+  `test_db_mssql_emits_mssql_image_and_env`, `test_db_cosmosdb_emits_emulator`,
+  `test_db_dotnet_uses_correct_connection_string_key`,
+  `test_db_go_webapi_supports_all_flavors`,
+  `test_azure_overlay_emits_db_param_in_bicepparam`,
+  `test_azure_bicep_uses_conditional_resource_blocks`,
+  `test_db_validation_rejects_unknown_flavor`.
+
+### Changed
+- `src/servicectl/cli.py`: added `--db` Click option (`postgres` default,
+  `postgres|mysql|mssql|cosmosdb` Choice). Added `db` to the success panel.
+- `src/servicectl/generator.py`: added `db` field to `ServiceGenerator`,
+  validates against `SUPPORTED_DBS`, exposes `db`, `db_azure_resource_type`,
+  `db_docker_image`, `db_env_prefix`, `db_healthcheck_cmd` in the Jinja
+  rendering context.
+- `src/servicectl/templates/python-flask|node-express|dotnet-webapi|go-webapi/docker-compose.dev.yml.j2`:
+  rewrote with `{% if db == '...' %}` conditional blocks for all 4 DB
+  flavors.
+- `src/servicectl/deploy/azure/infra/main.bicep.j2`: rewrote with
+  conditional resource blocks for the 4 DB types and a conditional
+  `appSettings` array that emits the right connection-string env vars
+  per flavor.
+
+### Added (Unreleased prior work)
 - **`go-webapi` template.** Go 1.22+ web API scaffold with `cmd/server/` +
   `internal/<service>/` layout, distroless static multi-stage Dockerfile,
   nonroot user, GitHub Actions + Azure DevOps CI (vet → race-detector test

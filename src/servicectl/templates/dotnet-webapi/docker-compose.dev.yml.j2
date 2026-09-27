@@ -1,4 +1,5 @@
 services:
+{% if db == 'postgres' %}
   postgres:
     image: postgres:16-alpine
     environment:
@@ -27,5 +28,103 @@ services:
     ports:
       - "3000:3000"
 
-volumes:
-  pgdata:
+  volumes:
+    pgdata:
+{% elif db == 'mysql' %}
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: {{ service_name }}
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysqldata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__MySql: "Server=mysql;Port=3306;Database={{ service_name }};User=root;Password=root"
+      ASPNETCORE_URLS: http://+:3000
+    ports:
+      - "3000:3000"
+
+  volumes:
+    mysqldata:
+{% elif db == 'mssql' %}
+  mssql:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Password!@#"
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssqldata:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P 'Password!@#' -Q 'SELECT 1' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    depends_on:
+      mssql:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__SqlServer: "Server=mssql;Database={{ service_name }};User Id=sa;Password=Password!@#;TrustServerCertificate=True"
+      ASPNETCORE_URLS: http://+:3000
+    ports:
+      - "3000:3000"
+
+  volumes:
+    mssqldata:
+{% elif db == 'cosmosdb' %}
+  # Azure Cosmos DB Linux emulator. Heavyweight: ~3GB memory, 30s+ to start.
+  # For production use, replace with a real Azure Cosmos DB account (see
+  # README.md for connection-string wiring via --deploy=azure).
+  cosmosdb:
+    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+    environment:
+      ACCEPT_EULA: "Y"
+      AZURE_COSMOS_EMULATOR_PARTITION_COUNT: "3"
+      AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE: "true"
+    ports:
+      - "8081:8081"
+      - "10250-10255:10250-10255"
+    volumes:
+      - cosmosdata:/tmp/cosmos/appdata
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fk https://localhost:8081/_explorer/index.html || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  app:
+    build: .
+    depends_on:
+      cosmosdb:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Cosmos: "AccountEndpoint=https://cosmosdb:8081/;AccountKey=C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw=="
+      ASPNETCORE_URLS: http://+:3000
+    ports:
+      - "3000:3000"
+
+  volumes:
+    cosmosdata:
+{% endif %}

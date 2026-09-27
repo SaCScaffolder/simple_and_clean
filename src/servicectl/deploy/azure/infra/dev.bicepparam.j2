@@ -7,7 +7,22 @@ param location = '{{ azure_region }}'
 param serviceName = '{{ service_name }}'
 param imageName = '{{ registry }}/{{ service_name }}:dev'
 param appServicePlanSku = 'B1'
-param postgresSku = 'B20ms'
 param acrSku = 'Basic'
 
-param postgresAdminPassword = 'replace-me-with-a-real-secret-from-key-vault'
+// Database backend (postgres|mysql|mssql|cosmosdb). Set to match --db flag.
+param db = '{{ db }}'
+
+// Database admin login/password. Same param covers all SQL flavors.
+// Cosmos ignores dbAdminLogin/dbAdminPassword; it uses account keys instead.
+param dbAdminLogin = 'dbadmin'
+param dbAdminPassword = 'replace-me-with-a-real-secret-from-key-vault'
+
+// Database SKUs (Bicep ignores params not relevant to the chosen --db).
+// Postgres: B20ms / B30ms / B40ms / B50ms / B60ms / B80ms / B100ms
+// MySQL:    B1ms / B2ms / B4ms / B8ms / B12ms / B16ms / B20ms
+// MSSQL:    Basic / S0 / S1 / S2 / S3 / P1 / P2 / P4
+// Cosmos:   400 / 1000 / 2500 / 10000 (autoscale max RU/s)
+param postgresSku = 'B20ms'
+param mysqlSku = 'B1ms'
+param sqlDbSku = 'Basic'
+param cosmosDbThroughput = 400
