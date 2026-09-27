@@ -101,6 +101,7 @@ jobs:
   servicectl-go:
     name: "servicectl-go (Go ${{ matrix.go-version }}, ${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
+    needs: test
     strategy:
       fail-fast: false
       matrix:
@@ -109,6 +110,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install servicectl (Python CLI)
+        # Each GitHub Actions job gets its own fresh runner, so even though
+        # this job has `needs: test`, the test job's `pip install -e .`
+        # doesn't carry over. Install the Python CLI here so the Go
+        # wrapper has something to shell out to.
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -e .
 
       - name: Set up Go ${{ matrix.go-version }}
         uses: actions/setup-go@v5
@@ -135,12 +150,7 @@ jobs:
 
       - name: Smoke test against the Python CLI
         # End-to-end test: actually scaffold a service through the Go wrapper.
-        # Requires Python + servicectl installed; uses the matrix's Python
-        # install via the shared `test` job's setup. We don't install the
-        # Python CLI here because that would conflict with `pip install -e .`
-        # running from the repo root in the `test` job; instead, this smoke
-        # test runs after the `test` job passes (via `needs: test`), which
-        # means `servicectl` is on PATH for this runner.
+        # servicectl is installed by the step above on this job's runner.
         working-directory: src/servicectl-go
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
