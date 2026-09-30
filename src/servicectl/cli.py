@@ -122,6 +122,7 @@ def main() -> None:
 )
 @click.option("--no-git", "no_git", is_flag=True, help="Skip `git init` after scaffolding.")
 @click.option("--no-readme", "no_readme", is_flag=True, help="Skip README generation (not recommended).")
+@click.option("--git-remote", "git_remote", type=str, default=None, help="HTTPS URL of a git remote to add as `origin` and push the initial commit to. Requires --no-git NOT to be set. Must start with https://.")
 @click.option("--in-place", "in_place", is_flag=True, help="Scaffold directly into --output-dir instead of creating a <name> subfolder. Refuses to overwrite a non-empty directory.")
 def init(
     name: str,
@@ -136,6 +137,7 @@ def init(
     in_place: bool,
     no_git: bool,
     no_readme: bool,
+    git_remote: str | None,
 ) -> None:
     """Scaffold a new service named NAME."""
     try:
@@ -152,6 +154,7 @@ def init(
             with_git=not no_git,
             with_readme=not no_readme,
             in_place=in_place,
+            git_remote=git_remote,
         )
         created = gen.run(console=console)
     except ScaffoldError as e:

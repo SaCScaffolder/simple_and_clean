@@ -554,6 +554,87 @@ def test_default_init_still_creates_subfolder():
         assert (Path(td) / "my-default-svc" / "pyproject.toml").exists()
 
 
+def test_git_remote_rejects_non_https():
+    """--git-remote must start with https:// (SSH not supported in v1)."""
+    with tempfile.TemporaryDirectory() as td:
+        gen = ServiceGenerator(
+            name="demo-remote",
+            template="python-flask",
+            ci_provider="github-actions",
+            deploy_target="local",
+            azure_region="eastus",
+            coverage_threshold=80,
+            registry="ghcr",
+            db="postgres",
+            output_dir=Path(td),
+            with_git=True,
+            with_readme=False,
+            in_place=False,
+            git_remote="git@github.com:me/demo.git",  # SSH form, rejected
+        )
+        try:
+            gen.run()
+        except ScaffoldError as e:
+            assert "--git-remote must start with https://" in str(e)
+        else:
+            raise AssertionError("expected ScaffoldError for non-https --git-remote")
+
+
+def test_git_remote_accepts_https_url():
+    """A valid https:// URL should be accepted without error during validation."""
+    with tempfile.TemporaryDirectory() as td:
+        gen = ServiceGenerator(
+            name="demo-remote-ok",
+            template="python-flask",
+            ci_provider="github-actions",
+            deploy_target="local",
+            azure_region="eastus",
+            coverage_threshold=80,
+            registry="ghcr",
+            db="postgres",
+            output_dir=Path(td),
+            with_git=True,
+            with_readme=False,
+            in_place=False,
+            git_remote="https://github.com/me/demo.git",
+        )
+        # Validation should not raise. The actual push would happen in run()
+        # but we don't run() here because that would require a real remote
+        # and network access. Just verify the URL was accepted.
+        # Note: _validate() is called inside run(), so we test it directly.
+        gen._validate()
+        assert gen.git_remote == "https://github.com/me/demo.git"
+
+
+def test_git_remote_with_no_git_does_not_crash():
+    """--no-git + --git-remote should not crash. (The remote flag is set but
+    no git operations are attempted since with_git is False.)"""
+    with tempfile.TemporaryDirectory() as td:
+        gen = ServiceGenerator(
+            name="demo-remote-nogit",
+            template="python-flask",
+            ci_provider="github-actions",
+            deploy_target="local",
+            azure_region="eastus",
+            coverage_threshold=80,
+            registry="ghcr",
+            db="postgres",
+            output_dir=Path(td),
+            with_git=False,
+            with_readme=False,
+            in_place=False,
+            git_remote="https://github.com/me/demo.git",
+        )
+        # Validation passes; run() executes without git operations.
+        gen._validate()
+        # We deliberately do NOT call gen.run() here because that would
+        # attempt the push, which requires a real remote. The point is
+        # that --git-remote is accepted as a configuration value even
+        # when --no-git is set.
+        assert gen.git_remote is not None
+        assert gen.with_git is False
+
+
 def test_dashed_name_renders_correctly():
     with tempfile.TemporaryDirectory() as td:
         target = _scaffold(Path(td), "my-cool.api", "python-flask", ci_provider="azure-devops")

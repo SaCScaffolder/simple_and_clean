@@ -7,6 +7,17 @@ All notable changes to `servicectl` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`--git-remote` flag for `servicectl init`.** Scaffolds a service and pushes the initial commit to a remote in one step. Usage: `servicectl init my-svc --template=go-webapi --git-remote=https://github.com/me/my-svc.git`. The flag must be an `https://` URL (SSH not supported in v1). After `git init`, the tool runs `git remote add origin <url>` followed by `git push -u origin main`. If the push fails (auth, non-fast-forward, wrong URL), the service is left in a usable state with the remote configured but not pushed — the error message includes a tip for the common non-fast-forward case (`git pull --rebase origin main && git push`).
+- **3 new smoke tests** cover the `--git-remote` flag:
+  - `test_git_remote_rejects_non_https` (SSH form rejected at validation)
+  - `test_git_remote_accepts_https_url` (validation accepts a valid https URL)
+  - `test_git_remote_with_no_git_does_not_crash` (no-op when `--no-git` is also set)
+
+### Changed
+- `src/servicectl/generator.py`: added `git_remote: str | None = None` field to `ServiceGenerator`. Added validation that `--git-remote` starts with `https://`. After a successful `git init`, runs `git remote add origin <url>` and `git push -u origin main`, with clear error messages on failure.
+- `src/servicectl/cli.py`: added `--git-remote` Click option (string, default None). Threaded through to `ServiceGenerator(git_remote=git_remote)`.
+
+### Added
 - **`--in-place` flag for `servicectl init`.** Scaffolds directly into `--output-dir` instead of creating a `<name>` subfolder. Useful when you want to scaffold a service into an existing empty directory (for example, an empty Git repo you've already initialized, or a pre-prepared demo directory). Refuses to overwrite a non-empty directory to protect user code. Default behavior (creating `<output_dir>/<name>`) is unchanged.
 - **5 new smoke tests** cover the `--in-place` flag:
   - `test_in_place_into_empty_dir_succeeds`

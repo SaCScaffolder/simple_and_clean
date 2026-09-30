@@ -64,6 +64,7 @@ class ServiceGenerator:
     with_git: bool
     with_readme: bool
     in_place: bool = False
+    git_remote: str | None = None
 
     def _validate(self) -> None:
         if not self.name or self.name.strip() == "":
@@ -79,6 +80,11 @@ class ServiceGenerator:
             raise ScaffoldError(f"unknown deploy target: {self.deploy_target!r}")
         if self.db not in SUPPORTED_DBS:
             raise ScaffoldError(f"unsupported --db: {self.db!r} (allowed: {sorted(SUPPORTED_DBS)})")
+        # --git-remote requires https:// (SSH not supported in v1).
+        if self.git_remote is not None and not self.git_remote.startswith("https://"):
+            raise ScaffoldError(
+                f"--git-remote must start with https:// (got: {self.git_remote!r})"
+            )
         # Make sure we don't overwrite an existing directory unless --in-place.
         target = self._resolve_target()
         if target.exists() and not self.in_place:
@@ -232,5 +238,37 @@ class ServiceGenerator:
                 raise ScaffoldError("`git` was not found on PATH. Install git or re-run with --no-git.")
             except subprocess.CalledProcessError as e:
                 raise ScaffoldError(f"`git init` failed: {e.stderr.decode(errors='replace')}")
+
+            # If --git-remote was specified, add the remote and push.
+            if self.git_remote:
+                try:
+                    subprocess.run(
+                        ["git", "-C", str(target), "remote", "add", "origin", self.git_remote],
+                        check=True,
+                        capture_output=True,
+                    )
+                    if console is not None:
+                        console.print(f"  ran      [bold]git remote add origin[/bold] {self.git_remote}")
+                except subprocess.CalledProcessError as e:
+                    raise ScaffoldError(
+                        f"`git remote add origin` failed: {e.stderr.decode(errors='replace')}"
+                    )
+                try:
+                    subprocess.run(
+                        ["git", "-C", str(target), "push", "-u", "origin", "main"],
+                        check=True,
+                        capture_output=True,
+                    )
+                    if console is not None:
+                        console.print("  ran      [bold]git push -u origin main[/bold]")
+                except subprocess.CalledProcessError as e:
+                    stderr = e.stderr.decode(errors='replace').strip() or e.stdout.decode(errors='replace').strip()
+                    raise ScaffoldError(
+                        f"`git push -u origin main` failed: {stderr}\n"
+                        f"Tip: if the remote has existing commits, run "
+                        f"`git -C {target} pull --rebase origin main && "
+                        f"git -C {target} push -u origin main`. "
+                        f"Otherwise verify the URL is correct and you have push access."
+                    )
 
         return target

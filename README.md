@@ -264,6 +264,7 @@ servicectl init <name>
   --in-place                                                scaffold directly into --output-dir (no <name> subfolder); refuses non-empty dirs
   --no-git                                                  skip `git init`
   --no-readme                                               skip README generation
+  --git-remote=<https-url>                                  add remote as `origin` and push the initial commit (must start with https://)
 
 servicectl doctor [PATH]
   --json     output JSON instead of human-readable text
