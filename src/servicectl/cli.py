@@ -122,6 +122,7 @@ def main() -> None:
 )
 @click.option("--no-git", "no_git", is_flag=True, help="Skip `git init` after scaffolding.")
 @click.option("--no-readme", "no_readme", is_flag=True, help="Skip README generation (not recommended).")
+@click.option("--in-place", "in_place", is_flag=True, help="Scaffold directly into --output-dir instead of creating a <name> subfolder. Refuses to overwrite a non-empty directory.")
 def init(
     name: str,
     template: str,
@@ -132,6 +133,7 @@ def init(
     registry: str,
     db: str,
     output_dir: Path,
+    in_place: bool,
     no_git: bool,
     no_readme: bool,
 ) -> None:
@@ -149,6 +151,7 @@ def init(
             output_dir=output_dir,
             with_git=not no_git,
             with_readme=not no_readme,
+            in_place=in_place,
         )
         created = gen.run(console=console)
     except ScaffoldError as e:

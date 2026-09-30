@@ -427,6 +427,133 @@ def test_modify_rejects_non_scaffolded_directory():
             raise AssertionError("expected ModifierError for non-scaffolded directory")
 
 
+def test_in_place_into_empty_dir_succeeds():
+    """--in-place scaffolds directly into the output-dir (no <name> subfolder)."""
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "demo-inplace"
+        target.mkdir()  # exists and is empty
+        gen = ServiceGenerator(
+            name="demo-inplace",
+            template="go-webapi",
+            ci_provider="github-actions",
+            deploy_target="local",
+            azure_region="eastus",
+            coverage_threshold=80,
+            registry="ghcr",
+            db="postgres",
+            output_dir=target,
+            with_git=False,
+            with_readme=False,
+            in_place=True,
+        )
+        created = gen.run()
+        # Service files should live at target itself, not target/demo-inplace/.
+        assert created.resolve() == target.resolve()
+        assert (target / "go.mod").exists()
+        assert (target / "cmd" / "server" / "main.go").exists()
+        # The <name> subfolder must NOT have been created.
+        assert not (target / "demo-inplace").exists()
+
+
+def test_in_place_into_nonexistent_dir_creates_it():
+    """--in-place should create the output-dir if it doesn't exist."""
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "fresh-dir" / "demo-inplace"
+        assert not target.exists()
+        gen = ServiceGenerator(
+            name="demo-inplace",
+            template="go-webapi",
+            ci_provider="github-actions",
+            deploy_target="local",
+            azure_region="eastus",
+            coverage_threshold=80,
+            registry="ghcr",
+            db="postgres",
+            output_dir=target,
+            with_git=False,
+            with_readme=False,
+            in_place=True,
+        )
+        created = gen.run()
+        assert created.resolve() == target.resolve()
+        assert (target / "go.mod").exists()
+
+
+def test_in_place_into_nonempty_dir_refuses():
+    """--in-place into a non-empty directory must raise ScaffoldError (no clobbering)."""
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "nonempty"
+        target.mkdir()
+        (target / "user-file.txt").write_text("don't overwrite me")
+        gen = ServiceGenerator(
+            name="demo-inplace",
+            template="go-webapi",
+            ci_provider="github-actions",
+            deploy_target="local",
+            azure_region="eastus",
+            coverage_threshold=80,
+            registry="ghcr",
+            db="postgres",
+            output_dir=target,
+            with_git=False,
+            with_readme=False,
+            in_place=True,
+        )
+        try:
+            gen.run()
+        except ScaffoldError as e:
+            assert "not empty" in str(e)
+            # The user's file must still be there.
+            assert (target / "user-file.txt").read_text() == "don't overwrite me"
+        else:
+            raise AssertionError("expected ScaffoldError for non-empty --in-place target")
+
+
+def test_in_place_into_current_dir_succeeds():
+    """--in-place --output-dir=. should scaffold into the current directory."""
+    with tempfile.TemporaryDirectory() as td:
+        gen = ServiceGenerator(
+            name="demo-curdir",
+            template="go-webapi",
+            ci_provider="github-actions",
+            deploy_target="local",
+            azure_region="eastus",
+            coverage_threshold=80,
+            registry="ghcr",
+            db="postgres",
+            output_dir=Path(td),  # acts as "current dir"
+            with_git=False,
+            with_readme=False,
+            in_place=True,
+        )
+        created = gen.run()
+        # Files live at td itself, not td/demo-curdir/.
+        assert created.resolve() == Path(td).resolve()
+        assert (Path(td) / "go.mod").exists()
+
+
+def test_default_init_still_creates_subfolder():
+    """Sanity check: WITHOUT --in-place, the default <output_dir>/<name> subfolder is still created."""
+    with tempfile.TemporaryDirectory() as td:
+        gen = ServiceGenerator(
+            name="my-default-svc",
+            template="python-flask",
+            ci_provider="github-actions",
+            deploy_target="local",
+            azure_region="eastus",
+            coverage_threshold=80,
+            registry="ghcr",
+            db="postgres",
+            output_dir=Path(td),
+            with_git=False,
+            with_readme=False,
+            in_place=False,
+        )
+        created = gen.run()
+        assert created.resolve() == (Path(td) / "my-default-svc").resolve()
+        assert (Path(td) / "my-default-svc" / "pyproject.toml").exists()
+
+
 def test_dashed_name_renders_correctly():
     with tempfile.TemporaryDirectory() as td:
         target = _scaffold(Path(td), "my-cool.api", "python-flask", ci_provider="azure-devops")

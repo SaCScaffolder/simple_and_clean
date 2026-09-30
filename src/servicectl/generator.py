@@ -63,6 +63,7 @@ class ServiceGenerator:
     output_dir: Path
     with_git: bool
     with_readme: bool
+    in_place: bool = False
 
     def _validate(self) -> None:
         if not self.name or self.name.strip() == "":
@@ -78,10 +79,27 @@ class ServiceGenerator:
             raise ScaffoldError(f"unknown deploy target: {self.deploy_target!r}")
         if self.db not in SUPPORTED_DBS:
             raise ScaffoldError(f"unsupported --db: {self.db!r} (allowed: {sorted(SUPPORTED_DBS)})")
-        # Make sure we don't overwrite an existing directory.
-        target = (self.output_dir / self.name).resolve()
-        if target.exists():
+        # Make sure we don't overwrite an existing directory unless --in-place.
+        target = self._resolve_target()
+        if target.exists() and not self.in_place:
             raise ScaffoldError(f"target directory already exists: {target}")
+        if self.in_place and target.exists() and any(target.iterdir()):
+            # In-place into a non-empty directory: refuse to avoid clobbering user code.
+            raise ScaffoldError(
+                f"--in-place target directory is not empty: {target}. "
+                "Pick an empty directory or remove this flag."
+            )
+
+    def _resolve_target(self) -> Path:
+        """Compute the absolute target path.
+
+        With the default (non-in-place) flow, target = output_dir / name.
+        With --in-place, target = output_dir (the service folder is the
+        output_dir itself; no <name> subfolder is created).
+        """
+        if self.in_place:
+            return self.output_dir.resolve()
+        return (self.output_dir / self.name).resolve()
 
     def _render_context(self) -> dict[str, object]:
         db_meta = SUPPORTED_DBS[self.db]
@@ -136,8 +154,10 @@ class ServiceGenerator:
     def run(self, console=None) -> Path:
         self._validate()
 
-        target = (self.output_dir / self.name).resolve()
-        target.mkdir(parents=True, exist_ok=False)
+        target = self._resolve_target()
+        # In --in-place mode, the target dir may already exist (and be empty).
+        # In default mode, the target dir must not exist yet (validated above).
+        target.mkdir(parents=True, exist_ok=self.in_place)
 
         tpl_root = template_path(self.template)
         if not tpl_root.is_dir():

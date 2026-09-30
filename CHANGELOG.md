@@ -7,6 +7,19 @@ All notable changes to `servicectl` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`--in-place` flag for `servicectl init`.** Scaffolds directly into `--output-dir` instead of creating a `<name>` subfolder. Useful when you want to scaffold a service into an existing empty directory (for example, an empty Git repo you've already initialized, or a pre-prepared demo directory). Refuses to overwrite a non-empty directory to protect user code. Default behavior (creating `<output_dir>/<name>`) is unchanged.
+- **5 new smoke tests** cover the `--in-place` flag:
+  - `test_in_place_into_empty_dir_succeeds`
+  - `test_in_place_into_nonexistent_dir_creates_it`
+  - `test_in_place_into_nonempty_dir_refuses`
+  - `test_in_place_into_current_dir_succeeds`
+  - `test_default_init_still_creates_subfolder` (regression guard)
+
+### Changed
+- `src/servicectl/generator.py`: added `in_place: bool = False` field to `ServiceGenerator`. New `_resolve_target()` method handles both default and in-place path computation. The `run()` method now passes `exist_ok=self.in_place` to `target.mkdir()` so in-place scaffolding into an existing empty dir works.
+- `src/servicectl/cli.py`: added `--in-place` Click flag with help text describing the new behavior. Threaded through to `ServiceGenerator(in_place=in_place)`.
+
+### Added
 - **`servicectl modify` command for --db.** New command lets you change the database backend of an existing scaffolded service without re-scaffolding from scratch. Usage:
   - `servicectl modify --show` prints current template, deploy, and db settings
   - `servicectl modify --db=<flavor>` rewrites `docker-compose.dev.yml` (always) plus `infra/main.bicep` and the 3 `infra/<env>.bicepparam` files (if `--deploy=azure` was used)

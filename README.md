@@ -261,6 +261,7 @@ servicectl init <name>
   --registry=<dockerhub|ghcr|ecr|acr|gcr>                   [default: ghcr]
   --db=<postgres|mysql|mssql|cosmosdb>                     [default: postgres]
   --output-dir=<path>                                       [default: .]
+  --in-place                                                scaffold directly into --output-dir (no <name> subfolder); refuses non-empty dirs
   --no-git                                                  skip `git init`
   --no-readme                                               skip README generation
 
