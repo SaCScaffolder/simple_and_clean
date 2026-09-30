@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from servicectl.generator import ServiceGenerator, ScaffoldError  # noqa: E402
+from servicectl.modifier import ModifierError, ServiceModifier  # noqa: E402
 from servicectl.templates import list_templates  # noqa: E402
 
 
@@ -313,6 +314,117 @@ def test_db_validation_rejects_unknown_flavor():
             assert "unsupported --db" in str(e)
         else:
             raise AssertionError("expected ScaffoldError for unknown --db value")
+
+
+def test_modify_show_prints_current_settings():
+    """`servicectl modify --show` should report current template, deploy, and db without changing anything."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-show", "python-flask", db="mysql")
+        mod = ServiceModifier(path=target, new_db="postgres")
+        mod.inspect()
+        assert mod.template == "python-flask"
+        assert mod.deploy_target == "local"
+        assert mod.current_db == "mysql"
+
+
+def test_modify_postgres_to_mysql_rerenders_compose():
+    """Modify --db=postgres -> --db=mysql rewrites docker-compose.dev.yml to use the mysql image + env vars."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-pg2my", "python-flask", db="postgres")
+        # Sanity: scaffold has POSTGRES_HOST.
+        compose_before = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        assert "POSTGRES_HOST" in compose_before
+        # Modify.
+        mod = ServiceModifier(path=target, new_db="mysql")
+        mod.run(dry_run=False)
+        compose_after = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        # Now has MYSQL_HOST and no POSTGRES_HOST.
+        assert "MYSQL_HOST" in compose_after
+        assert "POSTGRES_HOST" not in compose_after
+        assert "mysql:8.0" in compose_after
+
+
+def test_modify_mysql_to_postgres_rerenders_compose():
+    """Reverse direction: --db=mysql -> --db=postgres also works."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-my2pg", "python-flask", db="mysql")
+        mod = ServiceModifier(path=target, new_db="postgres")
+        mod.run(dry_run=False)
+        compose_after = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        assert "POSTGRES_HOST" in compose_after
+        assert "MYSQL_HOST" not in compose_after
+
+
+def test_modify_to_cosmos_rerenders_compose():
+    """--db=postgres -> --db=cosmosdb uses the Azure Cosmos DB emulator image."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-pg2cosmos", "python-flask", db="postgres")
+        mod = ServiceModifier(path=target, new_db="cosmosdb")
+        mod.run(dry_run=False)
+        compose_after = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        assert "azure-cosmos-emulator" in compose_after
+        assert "COSMOS_ENDPOINT" in compose_after
+        assert "POSTGRES_HOST" not in compose_after
+
+
+def test_modify_with_azure_overlay_rerenders_bicepparam():
+    """When the service was scaffolded with --deploy=azure, modify --db rewrites the bicepparam db param too."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(
+            Path(td), "demo-azure-pg2my", "python-flask",
+            deploy_target="azure", db="postgres",
+        )
+        # Sanity: dev bicepparam says db = 'postgres'.
+        bicepparam_before = (target / "infra" / "dev.bicepparam").read_text(encoding="utf-8")
+        assert "param db = 'postgres'" in bicepparam_before
+        # Modify.
+        mod = ServiceModifier(path=target, new_db="mysql")
+        mod.run(dry_run=False)
+        bicepparam_after = (target / "infra" / "dev.bicepparam").read_text(encoding="utf-8")
+        assert "param db = 'mysql'" in bicepparam_after
+        assert "param db = 'postgres'" not in bicepparam_after
+
+
+def test_modify_same_db_is_noop():
+    """Modifying to the same --db should be a no-op (no files written, no diff)."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-noop", "python-flask", db="postgres")
+        compose_before = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        mod = ServiceModifier(path=target, new_db="postgres")
+        mod.inspect()
+        assert mod.current_db == "postgres"
+        # diff() should return empty when there's nothing to change.
+        assert mod.diff() == []
+        # run() should return empty list.
+        assert mod.run(dry_run=False) == []
+        # File content should be unchanged.
+        compose_after = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        assert compose_before == compose_after
+
+
+def test_modify_rejects_unknown_db():
+    """Passing an unknown --db value to ServiceModifier should raise ModifierError."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-bad-mod", "python-flask", db="postgres")
+        mod = ServiceModifier(path=target, new_db="oracle")
+        try:
+            mod.run(dry_run=False)
+        except ModifierError as e:
+            assert "unsupported --db" in str(e)
+        else:
+            raise AssertionError("expected ModifierError for unknown --db value")
+
+
+def test_modify_rejects_non_scaffolded_directory():
+    """Pointing modify at a directory that doesn't have docker-compose.dev.yml should raise ModifierError."""
+    with tempfile.TemporaryDirectory() as td:
+        mod = ServiceModifier(path=Path(td), new_db="mysql")
+        try:
+            mod.run(dry_run=False)
+        except ModifierError as e:
+            assert "no docker-compose.dev.yml" in str(e)
+        else:
+            raise AssertionError("expected ModifierError for non-scaffolded directory")
 
 
 def test_dashed_name_renders_correctly():

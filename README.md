@@ -268,6 +268,12 @@ servicectl doctor [PATH]
   --json     output JSON instead of human-readable text
   --strict   treat warnings as errors (exit 2 if any warnings exist)
   --pause    wait for a keypress before exiting (for shortcut launches)
+
+servicectl modify [PATH]
+  --db=<postgres|mysql|mssql|cosmosdb>   change the database backend
+  --show                                  print current settings (template, deploy, db), no changes
+  --dry-run                               show unified diff without writing files
+  --yes                                   skip confirmation prompt before writing
 ```
 
 ---

@@ -7,6 +7,39 @@ All notable changes to `servicectl` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`servicectl modify` command for --db.** New command lets you change the database backend of an existing scaffolded service without re-scaffolding from scratch. Usage:
+  - `servicectl modify --show` prints current template, deploy, and db settings
+  - `servicectl modify --db=<flavor>` rewrites `docker-compose.dev.yml` (always) plus `infra/main.bicep` and the 3 `infra/<env>.bicepparam` files (if `--deploy=azure` was used)
+  - `--dry-run` shows what would change as a unified diff without writing
+  - `--yes` skips the confirmation prompt
+- **8 new smoke tests** cover the modify command:
+  - `test_modify_show_prints_current_settings`
+  - `test_modify_postgres_to_mysql_rerenders_compose`
+  - `test_modify_mysql_to_postgres_rerenders_compose`
+  - `test_modify_to_cosmos_rerenders_compose`
+  - `test_modify_with_azure_overlay_rerenders_bicepparam`
+  - `test_modify_same_db_is_noop`
+  - `test_modify_rejects_unknown_db`
+  - `test_modify_rejects_non_scaffolded_directory`
+
+### Changed
+- `src/servicectl/modifier.py`: NEW module containing `ServiceModifier` and `ModifierError`. Reads current `--db` from `docker-compose.dev.yml` via sentinel strings (postgres:16-alpine / mysql:8.0 / azure-sql-edge / azure-cosmos-emulator). Detects template via file presence (pyproject.toml / go.mod / package.json / Program.cs). Detects Azure overlay via `infra/main.bicep` existence.
+- `src/servicectl/cli.py`: added `modify` command with `--db`, `--show`, `--dry-run`, `--yes` options. Renders unified diff with color (green +/red -) and asks for confirmation before writing.
+
+### Notes
+- v1 of `modify` only supports `--db`. Future versions will add `--ci`, `--registry`, `--azure-region`, `--coverage`.
+- Service-name modification is intentionally NOT supported in v1 (too destructive; would need a separate explicit-confirmation flow).
+- Template modification is intentionally NOT supported in v1 (high risk of losing user edits; defer to v2).
+- **9 new smoke tests** cover the `--db` flag:
+  `test_db_default_is_postgres`, `test_db_mysql_emits_mysql_image_and_env`,
+  `test_db_mssql_emits_mssql_image_and_env`, `test_db_cosmosdb_emits_emulator`,
+  `test_db_dotnet_uses_correct_connection_string_key`,
+  `test_db_go_webapi_supports_all_flavors`,
+  `test_azure_overlay_emits_db_param_in_bicepparam`,
+  `test_azure_bicep_uses_conditional_resource_blocks`,
+  `test_db_validation_rejects_unknown_flavor`.
+
+### Added
 - **`--db` flag for database backend selection.** New `servicectl init` flag
   selects the database flavor for both local dev (docker-compose) and
   Azure deploy (Bicep). Supported values: `postgres` (default,

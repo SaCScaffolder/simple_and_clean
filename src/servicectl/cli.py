@@ -25,6 +25,7 @@ from .doctor import (
     run_checks,
 )
 from .generator import ServiceGenerator, ScaffoldError
+from .modifier import ModifierError, ServiceModifier
 from .templates import list_templates
 
 # Force UTF-8 so Rich's Unicode glyphs (✓, →) don't choke on Windows cp1252 consoles.
@@ -213,6 +214,113 @@ def init(
     is_flag=True,
     help="Wait for a keypress before exiting (useful when launched from a shortcut so the window doesn't close immediately).",
 )
+def modify(
+    path: Path,
+    db: str | None,
+    show_only: bool,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Modify settings on an existing scaffolded service.
+
+    For v1 only --db is supported. Other fields (--ci, --registry,
+    --azure-region, --coverage) will be added in subsequent versions.
+
+    Re-renders the relevant files with the new value and shows a unified diff
+    before writing. Use --dry-run to preview without writing.
+    """
+    try:
+        mod = ServiceModifier(path=path, new_db=db or "postgres")
+        mod.inspect()
+    except ModifierError as e:
+        err_console.print(f"[bold red]error:[/bold red] {e}")
+        sys.exit(2)
+
+    if show_only:
+        console.print(
+            Panel(
+                f"  template:    {mod.template or 'unknown'}\n"
+                f"  deploy:      {mod.deploy_target}\n"
+                f"  db:          {mod.current_db or 'unknown'}\n",
+                title=f"settings for {path}",
+                border_style="cyan",
+            )
+        )
+        return
+
+    if db is None:
+        err_console.print(
+            "[bold red]error:[/bold red] no --db flag passed. "
+            "Currently `servicectl modify` only supports --db. "
+            "Use --show to inspect current settings without changing anything."
+        )
+        sys.exit(2)
+
+    if mod.current_db == "unknown":
+        err_console.print(
+            f"[bold red]error:[/bold red] could not detect current --db at {path}. "
+            "Was this service scaffolded by servicectl?"
+        )
+        sys.exit(2)
+
+    if mod.current_db == db:
+        console.print(
+            f"[green]✓[/green] {path} is already using --db={db}. No changes needed."
+        )
+        return
+
+    try:
+        diffs = mod.diff()
+    except ModifierError as e:
+        err_console.print(f"[bold red]error:[/bold red] {e}")
+        sys.exit(2)
+
+    if not diffs:
+        console.print(
+            f"[green]✓[/green] Re-rendering --db={mod.current_db} -> --db={db} produced no changes."
+        )
+        return
+
+    console.print(f"[bold]Pending changes: {mod.current_db} -> {db}[/bold]")
+    for rel, diff_text in diffs:
+        console.print(f"\n[cyan]--- {rel}[/cyan]")
+        for line in diff_text.splitlines():
+            if line.startswith("+++") or line.startswith("---"):
+                console.print(f"[bold]{line}[/bold]")
+            elif line.startswith("+"):
+                console.print(f"[green]{line}[/green]")
+            elif line.startswith("-"):
+                console.print(f"[red]{line}[/red]")
+            else:
+                console.print(line)
+
+    if dry_run:
+        console.print("\n[yellow]--dry-run set; no files written.[/yellow]")
+        return
+
+    if not yes:
+        console.print(f"\nApply these changes to {path}? [y/N]")
+        try:
+            response = input().strip().lower()
+        except EOFError:
+            response = "n"
+        if response != "y":
+            console.print("[yellow]Aborted; no files written.[/yellow]")
+            return
+
+    try:
+        written = mod.run(dry_run=False)
+    except ModifierError as e:
+        err_console.print(f"[bold red]error:[/bold red] {e}")
+        sys.exit(2)
+
+    console.print(
+        f"\n[bold green]✓[/bold green] Updated {len(written)} file(s) under {path}:"
+    )
+    for rel in written:
+        console.print(f"  - {rel}")
+
+
 def doctor(path: Path, strict: bool, as_json: bool, pause: bool) -> None:
     """Validate an existing scaffolded service against servicectl standards.
 
