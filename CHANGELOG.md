@@ -6,6 +6,10 @@ All notable changes to `servicectl` are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **docker-compose.dev.yml template indentation bug.** All 4 templates (`python-flask`, `node-express`, `dotnet-webapi`, `go-webapi`) had the top-level `volumes:` block indented with 2 spaces under `services:`. This made Docker Compose interpret `volumes:` as a service called "volumes" rather than a top-level named volume declaration, causing `docker compose up` to fail with: `services.volumes additional properties 'pgdata' not allowed`. Fixed by un-indenting the top-level `volumes:` block to column 0 in all 16 occurrences (4 templates x 4 db flavors). Discovered while testing the URL shortener demo locally.
+- **Added regression test** `test_docker_compose_has_top_level_volumes_block` that fails if any scaffolded `docker-compose.dev.yml` has the indented `  volumes:` block.
+
 ### Added
 - **`--git-remote` flag for `servicectl init`.** Scaffolds a service and pushes the initial commit to a remote in one step. Usage: `servicectl init my-svc --template=go-webapi --git-remote=https://github.com/me/my-svc.git`. The flag must be an `https://` URL (SSH not supported in v1). After `git init`, the tool runs `git remote add origin <url>` followed by `git push -u origin main`. If the push fails (auth, non-fast-forward, wrong URL), the service is left in a usable state with the remote configured but not pushed — the error message includes a tip for the common non-fast-forward case (`git pull --rebase origin main && git push`).
 - **3 new smoke tests** cover the `--git-remote` flag:

@@ -239,6 +239,31 @@ class ServiceGenerator:
             except subprocess.CalledProcessError as e:
                 raise ScaffoldError(f"`git init` failed: {e.stderr.decode(errors='replace')}")
 
+            # Make the initial commit so that --git-remote has a `main` ref to push.
+            # Without this, `git push -u origin main` fails with
+            # `error: src refspec main does not match any` because no commit exists yet.
+            # Use -C <target> so the git command runs in the scaffolded directory even when
+            # the user's CWD is elsewhere.
+            try:
+                subprocess.run(
+                    ["git", "-C", str(target), "add", "-A"],
+                    check=True,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "-C", str(target), "-c", "user.email=servicectl@example.com",
+                     "-c", "user.name=servicectl", "commit", "-q",
+                     "-m", "Initial scaffold from servicectl"],
+                    check=True,
+                    capture_output=True,
+                )
+                if console is not None:
+                    console.print("  ran      [bold]git add && git commit[/bold] (initial commit)")
+            except subprocess.CalledProcessError as e:
+                raise ScaffoldError(
+                    f"`git add && git commit` failed: {e.stderr.decode(errors='replace')}"
+                )
+
             # If --git-remote was specified, add the remote and push.
             if self.git_remote:
                 try:

@@ -28,7 +28,7 @@ services:
     ports:
       - "3000:3000"
 
-  volumes:
+volumes:
     pgdata:
 {% elif db == 'mysql' %}
   mysql:
@@ -60,7 +60,7 @@ services:
     ports:
       - "3000:3000"
 
-  volumes:
+volumes:
     mysqldata:
 {% elif db == 'mssql' %}
   mssql:
@@ -90,7 +90,7 @@ services:
     ports:
       - "3000:3000"
 
-  volumes:
+volumes:
     mssqldata:
 {% elif db == 'cosmosdb' %}
   # Azure Cosmos DB Linux emulator. Heavyweight: ~3GB memory, 30s+ to start.
@@ -125,6 +125,6 @@ services:
     ports:
       - "3000:3000"
 
-  volumes:
+volumes:
     cosmosdata:
 {% endif %}

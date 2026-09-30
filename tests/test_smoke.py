@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from servicectl.generator import ServiceGenerator, ScaffoldError  # noqa: E402
 from servicectl.modifier import ModifierError, ServiceModifier  # noqa: E402
 from servicectl.templates import list_templates  # noqa: E402
+import subprocess  # noqa: E402
 
 
 def _scaffold(tmp: Path, name: str, template: str, **overrides) -> Path:
@@ -427,6 +428,30 @@ def test_modify_rejects_non_scaffolded_directory():
             raise AssertionError("expected ModifierError for non-scaffolded directory")
 
 
+def test_docker_compose_has_top_level_volumes_block():
+    """Regression test: every scaffolded docker-compose.dev.yml must have a top-level
+    `volumes:` block (column 0), NOT indented under `services:`. The previous bug had
+    `  volumes:` indented 2 spaces, which made docker compose interpret it as a service
+    called `volumes` and fail with: `services.volumes additional properties 'pgdata' not allowed`.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-compose-volumes", "python-flask", db="postgres")
+        compose = (target / "docker-compose.dev.yml").read_text(encoding="utf-8")
+        # Top-level volumes block must exist at column 0.
+        assert "volumes:\n" in compose or compose.endswith("volumes:\n"), (
+            "expected top-level `volumes:` block in docker-compose.dev.yml\n"
+            f"got:\n{compose}"
+        )
+        # And there must NOT be an indented `  volumes:` (which would be the bug).
+        # Allow 4-space indented `volumes:` (per-service mount list) but not 2-space.
+        bad_lines = [line for line in compose.splitlines() if line == "  volumes:"]
+        assert not bad_lines, (
+            "found indented `  volumes:` block in docker-compose.dev.yml "
+            "(should be at column 0)\n"
+            f"got: {bad_lines}"
+        )
+
+
 def test_in_place_into_empty_dir_succeeds():
     """--in-place scaffolds directly into the output-dir (no <name> subfolder)."""
     with tempfile.TemporaryDirectory() as td:
@@ -552,6 +577,37 @@ def test_default_init_still_creates_subfolder():
         created = gen.run()
         assert created.resolve() == (Path(td) / "my-default-svc").resolve()
         assert (Path(td) / "my-default-svc" / "pyproject.toml").exists()
+
+
+def test_with_git_makes_initial_commit():
+    """Regression test: git init alone doesn't create a `main` ref. We need
+    git add + git commit after init so that --git-remote has a ref to push.
+    Without this fix, --git-remote fails with `src refspec main does not match any`."""
+    with tempfile.TemporaryDirectory() as td:
+        gen = ServiceGenerator(
+            name="demo-init-commit",
+            template="python-flask",
+            ci_provider="github-actions",
+            deploy_target="local",
+            azure_region="eastus",
+            coverage_threshold=80,
+            registry="ghcr",
+            db="postgres",
+            output_dir=Path(td),
+            with_git=True,
+            with_readme=False,
+            in_place=False,
+        )
+        created = gen.run()
+        # Verify a commit exists on the main branch.
+        result = subprocess.run(
+            ["git", "-C", str(created), "log", "--oneline"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        # There should be at least one commit. The message contains "servicectl".
+        assert "servicectl" in result.stdout.lower(), f"expected initial commit, got: {result.stdout!r}"
 
 
 def test_git_remote_rejects_non_https():
