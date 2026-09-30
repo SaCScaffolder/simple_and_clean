@@ -140,6 +140,10 @@ jobs:
         run: go test ./... -count=1
 
       - name: Build servicectl-go
+        # Use bash explicitly so the if/then/fi conditional works on both
+        # Linux and Windows runners. (GitHub Actions defaults to PowerShell
+        # on Windows, which doesn't understand bash syntax.)
+        shell: bash
         working-directory: src/servicectl-go
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -151,6 +155,9 @@ jobs:
       - name: Smoke test against the Python CLI
         # End-to-end test: actually scaffold a service through the Go wrapper.
         # servicectl is installed by the step above on this job's runner.
+        # Use bash explicitly so the if/then/fi conditional works on both
+        # Linux and Windows runners.
+        shell: bash
         working-directory: src/servicectl-go
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
