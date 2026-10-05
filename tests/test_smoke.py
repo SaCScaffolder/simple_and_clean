@@ -455,6 +455,41 @@ def test_docker_compose_has_top_level_volumes_block():
         )
 
 
+def test_scaffolded_services_ship_githooks_pre_commit():
+    """Regression test: every scaffolded service must ship a `.githooks/pre-commit`
+    hook that runs the language-appropriate smoke test, with install instructions.
+    Closes the gap where simple_and_clean's own `.githooks/pre-commit` protected the
+    scaffolder but not the services it generated.
+    """
+    template_test_commands = {
+        "go-webapi": ["go vet ./...", "go test -race"],
+        "node-express": ["npm run lint", "npm test"],
+        "node-react-web": ["npm run lint", "npm test"],
+        "python-flask": ["pytest"],
+        "dotnet-webapi": ["dotnet test"],
+    }
+    for tpl, expected_lines in template_test_commands.items():
+        with tempfile.TemporaryDirectory() as td:
+            target = _scaffold(Path(td), f"demo-{tpl}", tpl)
+            hook = target / ".githooks" / "pre-commit"
+            assert hook.exists(), (
+                f"template {tpl!r} did not ship .githooks/pre-commit. "
+                f"Recruiters who clone this service would lose the pre-push "
+                f"smoke-test gate that simple_and_clean itself has."
+            )
+            content = hook.read_text(encoding="utf-8")
+            for needle in expected_lines:
+                assert needle in content, (
+                    f"template {tpl!r} hook missing expected line {needle!r}.\n"
+                    f"Got:\n{content}"
+                )
+            # Install hint must be present (one-time `git config core.hooksPath`).
+            assert "git config core.hooksPath .githooks" in content, (
+                f"template {tpl!r} hook missing install hint.\n"
+                f"Got:\n{content}"
+            )
+
+
 def test_in_place_into_empty_dir_succeeds():
     """--in-place scaffolds directly into the output-dir (no <name> subfolder)."""
     with tempfile.TemporaryDirectory() as td:

@@ -79,6 +79,17 @@ az login
 az containerapp up --source . --resource-group <rg> --environment <env>
 ```{% endif %}
 
+## Pre-commit hook
+
+A `.githooks/pre-commit` script is bundled that runs the same smoke tests
+CI does — locally, before each commit. To enable it once per checkout:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+To bypass in an emergency (`--no-verify`).
+
 ## Secrets
 
 Never commit secrets. `.env.example` shows the required variables. CI runs
