@@ -34,20 +34,35 @@ import (
 	"github.com/henryorsborn/{{ service_name }}/internal/{{ service_name_snake }}"
 )
 
-func main() {
+// buildServer wires the http.Server together from $PORT and NewMux().
+// Extracted from main() so the wiring is exercisable from a test, which
+// gives cmd/server/main.go real coverage.
+func buildServer() *http.Server {
+	return &http.Server{
+		Addr:              listenAddr(),
+		Handler:           {{ service_name_snake }}.NewMux(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+}
+
+// listenAddr returns ":$PORT" with PORT defaulting to "3000".
+func listenAddr() string {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "3000"
 	}
+	return ":" + port
+}
 
-	srv := &http.Server{
-		Addr:              ":" + port,
-		Handler:           {{ service_name_snake }}.NewMux(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	// Run the server in a goroutine so we can listen for shutdown signals
-	// on the main goroutine.
+// runServer starts srv in a goroutine and blocks until either srv
+// errors fatally or sigCh receives a signal. On signal, gracefully
+// drains in-flight requests with a 10-second timeout.
+//
+// Extracted from main() so the lifecycle logic is exercisable in tests.
+// Production callers invoke this from main(); tests invoke it directly.
+// Returns nil on graceful shutdown, or the listener error if ListenAndServe
+// returned a non-ErrServerClosed error.
+func runServer(srv *http.Server, sigCh <-chan os.Signal) error {
 	errCh := make(chan error, 1)
 	go func() {
 		log.Printf("{{ service_name }} listening on %s", srv.Addr)
@@ -58,25 +73,30 @@ func main() {
 		errCh <- nil
 	}()
 
-	// Wait for a signal or a fatal server error.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	select {
 	case sig := <-sigCh:
 		log.Printf("received signal %s; shutting down", sig)
 	case err := <-errCh:
 		if err != nil {
-			log.Fatalf("server error: %v", err)
+			return err
 		}
-		return
+		return nil
 	}
 
-	// Drain in-flight requests for up to 10 seconds.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("graceful shutdown failed: %v", err)
-		os.Exit(1)
+		return err
 	}
 	log.Printf("shutdown complete")
+	return nil
+}
+
+func main() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	if err := runServer(buildServer(), sigCh); err != nil {
+		log.Fatalf("server error: %v", err)
+	}
 }

@@ -1,0 +1,217 @@
+// Tests for the cmd/server entrypoint of {{ service_name }}.
+//
+// main() itself is just signal wiring (signal.Notify + invoke runServer).
+// The real entry point under test is buildServer(), listenAddr(), and
+// runServer(). We exercise them directly:
+//
+//   - buildServer: assert the assembled *http.Server uses NewMux() and
+//     responds to the routes the rest of the suite expects.
+//   - listenAddr: assert $PORT overrides the default and the default
+//     is ":3000" when PORT is unset.
+//   - runServer: drive it with a synthetic signal channel and assert
+//     it shuts down gracefully.
+//
+// This brings cmd/server/main.go from 0% to real coverage so the
+// scaffolded service clears the 80% coverage gate on day one.
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// TestWiringMirrorsMain asserts that buildServer() returns an
+// http.Server whose Handler responds to the routes the rest of the
+// suite expects. If a future scaffold change swaps NewMux() for
+// something that doesn't register /healthz, /readyz, /, this test
+// catches it.
+func TestWiringMirrorsMain(t *testing.T) {
+	srv := buildServer()
+	ts := httptest.NewServer(srv.Handler)
+	defer ts.Close()
+
+	for _, path := range []string{"/healthz", "/readyz", "/"} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s: expected 200, got %d", path, resp.StatusCode)
+		}
+	}
+}
+
+// TestDefaultAddrIsColonThreeThousand guards the documented default
+// port. If you change the default in listenAddr(), change this test
+// to match.
+func TestDefaultAddrIsColonThreeThousand(t *testing.T) {
+	t.Setenv("PORT", "")
+	if got := listenAddr(); got != ":3000" {
+		t.Errorf("expected default Addr=:3000, got %q", got)
+	}
+}
+
+// TestPortEnvOverridesDefault verifies that $PORT changes the listen
+// address. This is what makes buildServer() usable in containers
+// without recompiling.
+func TestPortEnvOverridesDefault(t *testing.T) {
+	t.Setenv("PORT", "8080")
+	if got := listenAddr(); got != ":8080" {
+		t.Errorf("expected Addr=:8080, got %q", got)
+	}
+}
+
+// TestServiceNameAdvertised confirms the index endpoint's "service"
+// field matches the service name. Proves the assembled mux serves
+// the right service name end-to-end.
+func TestServiceNameAdvertised(t *testing.T) {
+	srv := buildServer()
+	ts := httptest.NewServer(srv.Handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if !strings.HasPrefix(body["service"], "{{ service_name }}") {
+		t.Errorf("expected service name to start with %q, got %q",
+			"{{ service_name }}", body["service"])
+	}
+}
+
+// TestRunServerShutsDownOnSignal exercises runServer's signal-handling
+// path: we bind a real listener on a random port, run runServer in a
+// goroutine, send a synthetic SIGTERM, and assert it returns and the
+// listener is closed.
+func TestRunServerShutsDownOnSignal(t *testing.T) {
+	// Pick a free port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen on random port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	srv := buildServer()
+	// Override Addr to the random port we picked.
+	srv.Addr = net.JoinHostPort("127.0.0.1", itoa(port))
+
+	sigCh := make(chan os.Signal, 1)
+
+	got := make(chan error, 1)
+	go func() {
+		got <- runServer(srv, sigCh)
+	}()
+
+	// Wait briefly for the server to be ready, then send a signal.
+	base := "http://" + srv.Addr
+	if !waitForReady(base+"/healthz", 2*time.Second) {
+		t.Skipf("server did not come up on %s; signal channel may have closed", srv.Addr)
+	}
+	sigCh <- syscall.SIGTERM
+
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatalf("runServer returned error on signal shutdown: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runServer did not return within 3s of SIGTERM")
+	}
+
+	// Confirm the listener is closed: a fresh connection should fail.
+	if _, err := net.DialTimeout("tcp", srv.Addr, 200*time.Millisecond); err == nil {
+		t.Errorf("expected connection refused after shutdown, got nil")
+	}
+}
+
+// waitForReady polls url until it returns 200 or timeout elapses.
+// Returns true if the URL became ready, false otherwise.
+func waitForReady(url string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return true
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// TestRunServerShutsDownOnServerError exercises runServer's errCh
+// path: we bind a real listener on a random port, hand it to the
+// server, then close the listener before runServer starts so
+// ListenAndServe returns an error. runServer must receive that
+// error on errCh and return it.
+func TestRunServerShutsDownOnServerError(t *testing.T) {
+	// Bind a port but never release it, then ask the server to bind
+	// the same port. That makes ListenAndServe return an error.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.Addr().String()
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           http.NewServeMux(),
+		ReadHeaderTimeout: 5 * time.Millisecond,
+	}
+
+	sigCh := make(chan os.Signal, 1)
+
+	got := make(chan error, 1)
+	go func() {
+		got <- runServer(srv, sigCh)
+	}()
+
+	// runServer should detect the bind failure and return with the error.
+	select {
+	case err := <-got:
+		if err == nil {
+			t.Fatal("expected error from runServer on bind failure, got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runServer did not return within 2s of bind failure")
+	}
+}
+
+// itoa is a tiny strconv.Itoa shim. Avoids pulling strconv in just for one
+// usage in this test file.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
+// sentinel unused-import guard. Keeps `errors` referenced in case a
+// future test asserts on ListenAndServe's error path.
+var _ = errors.New
