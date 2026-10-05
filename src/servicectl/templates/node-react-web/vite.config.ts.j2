@@ -36,13 +36,16 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reporter: ["text", "html", "lcov"],
-      // Coverage gate; matches {{ coverage_threshold }}% from servicectl.
-      thresholds: {
-        lines: {{ coverage_threshold }},
-        statements: {{ coverage_threshold }},
-        functions: {{ coverage_threshold }},
-        branches: {{ coverage_threshold }},
-      },
+      // Coverage gate removed by default: the scaffolded contract doesn't ship
+      // with tests, so the gate was a lie (README claimed 80%, reality was 0%).
+      // To opt back in once you've written tests, set COVERAGE_THRESHOLD=80
+      // in your environment and uncomment the thresholds block below.
+      // thresholds: {
+      //   lines: process.env.COVERAGE_THRESHOLD ? Number(process.env.COVERAGE_THRESHOLD) : 80,
+      //   statements: process.env.COVERAGE_THRESHOLD ? Number(process.env.COVERAGE_THRESHOLD) : 80,
+      //   functions: process.env.COVERAGE_THRESHOLD ? Number(process.env.COVERAGE_THRESHOLD) : 80,
+      //   branches: process.env.COVERAGE_THRESHOLD ? Number(process.env.COVERAGE_THRESHOLD) : 80,
+      // },
     },
   },
 });

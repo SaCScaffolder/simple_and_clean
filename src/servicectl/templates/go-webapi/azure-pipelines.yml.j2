@@ -49,7 +49,10 @@ stages:
           - script: go vet ./...
             displayName: go vet
           - script: |
-              go test ./... -count=1 -race -coverprofile=coverage.out -covermode=atomic
+              # -covermode=atomic was removed because it requires the covdata tool,
+              # which is not present in every Go distribution. The default "set"
+              # coverage mode works everywhere and is fast enough for CI.
+              go test ./... -count=1 -race -coverprofile=coverage.out
               COVERAGE=$(go tool cover -func=coverage.out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
               echo "total coverage: ${COVERAGE}%"
               awk -v want={{ coverage_threshold }} -v got="$COVERAGE" 'BEGIN { if (got+0 < want+0) { exit 1 } }'
