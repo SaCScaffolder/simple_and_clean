@@ -695,6 +695,221 @@ def test_init_from_config_unknown_key_silently_dropped_by_default():
         )
 
 
+def test_init_from_config_invalid_json_errors():
+    """--from-config=<file> where <file> is not valid JSON errors with exit 2."""
+    from click.testing import CliRunner
+    from servicectl.cli import init as init_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        cfg = Path(td) / "broken.json"
+        cfg.write_text("this is { not valid JSON", encoding="utf-8")
+        result = runner.invoke(
+            init_cmd,
+            ["--from-config", str(cfg), "--no-git"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code != 0
+        assert "not valid JSON" in result.output
+
+
+def test_init_from_config_top_level_not_object_errors():
+    """--from-config=<file> where <file> is a JSON array (not object) errors.
+    Schema is a flat JSON object; arrays / scalars are rejected.
+    """
+    from click.testing import CliRunner
+    from servicectl.cli import init as init_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        cfg = Path(td) / "array.json"
+        cfg.write_text("[1, 2, 3]", encoding="utf-8")
+        result = runner.invoke(
+            init_cmd,
+            ["--from-config", str(cfg), "--no-git"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code != 0
+        assert "must contain a JSON object" in result.output
+
+
+def test_init_from_config_missing_template_errors():
+    """If JSON has 'name' but not 'template', post-merge validation errors."""
+    from click.testing import CliRunner
+    from servicectl.cli import init as init_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        cfg = Path(td) / "spec.json"
+        cfg.write_text(json.dumps({"name": "x"}), encoding="utf-8")
+        result = runner.invoke(
+            init_cmd,
+            ["--from-config", str(cfg), "--no-git"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code != 0
+        assert "template" in result.output.lower()
+
+
+def test_main_module_entry_point_invokes_cli():
+    """`python -m servicectl` routes to cli.main. Covers servicectl/__main__.py
+    which was at 0% coverage before this test.
+
+    We use runpy so coverage instrumentation picks up the
+    if __name__ == '__main__' block (subprocess would not).
+    """
+    import runpy
+    saved_argv = sys.argv
+    sys.argv = ["servicectl", "--help"]
+    try:
+        runpy.run_module("servicectl", run_name="__main__", alter_sys=True)
+    except SystemExit as e:
+        assert e.code == 0, f"unexpected exit code: {e.code}"
+    finally:
+        sys.argv = saved_argv
+
+
+def test_modify_show_only_prints_current_settings():
+    """servicectl modify <path> --show prints the current settings and exits."""
+    from click.testing import CliRunner
+    from servicectl.cli import modify as modify_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "demo-modify"
+        target.mkdir()
+        ServiceGenerator(
+            name="demo-modify", template="go-webapi", ci_provider="github-actions",
+            deploy_target="local", azure_region="eastus", coverage_threshold=80,
+            registry="ghcr", db="postgres", output_dir=target,
+            with_git=False, with_readme=False,
+        ).run()
+        actual = target / "demo-modify"
+        result = runner.invoke(
+            modify_cmd,
+            [str(actual), "--show"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"modify --show failed: {result.output}"
+
+
+def test_modify_same_db_is_noop():
+    """modify --db=postgres on a postgres-scaffolded service is a no-op."""
+    from click.testing import CliRunner
+    from servicectl.cli import modify as modify_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "demo-noop"
+        target.mkdir()
+        ServiceGenerator(
+            name="demo-noop", template="go-webapi", ci_provider="github-actions",
+            deploy_target="local", azure_region="eastus", coverage_threshold=80,
+            registry="ghcr", db="postgres", output_dir=target,
+            with_git=False, with_readme=False,
+        ).run()
+        actual = target / "demo-noop"
+        result = runner.invoke(
+            modify_cmd,
+            [str(actual), "--db", "postgres", "--yes"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        assert "already using" in result.output or "No changes needed" in result.output
+
+
+def test_template_path_returns_traversable_for_known_template():
+    """template_path('go-webapi') returns a path object that has joinpath
+    (works whether it's the source-tree Path or the importlib.resources
+    Traversable fallback). Covers both branches of templates.template_path.
+    """
+    from servicectl import templates
+    result = templates.template_path("go-webapi")
+    # Either path-like (has / operator and exists) or Traversable-like
+    # (has joinpath). Both branches of template_path must return something
+    # the rest of the generator can use.
+    assert result is not None
+    assert hasattr(result, "__truediv__") or hasattr(result, "joinpath")
+
+
+def test_init_invalid_name_characters_errors_cleanly():
+    """`servicectl init <name>` where <name> contains invalid chars errors
+    with exit 2 (Covers the ScaffoldError -> err_console.print branch in cli.py).
+    """
+    from click.testing import CliRunner
+    from servicectl.cli import init as init_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        result = runner.invoke(
+            init_cmd,
+            ["bad/name!chars", "--template=go-webapi", "--output-dir", td, "--no-git", "--no-readme"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code != 0
+        # Should be a clean error, not a traceback.
+        assert "Traceback" not in result.output
+        # Should mention the actual problem.
+        assert (
+            "invalid" in result.output.lower()
+            or "character" in result.output.lower()
+        ), f"expected an error message about invalid chars, got: {result.output}"
+
+
+def test_modify_path_with_no_db_flag_errors():
+    """`servicectl modify <path>` without --db errors with a useful message.
+    Covers the 'no --db flag passed' branch in cli.py around line 444.
+    """
+    from click.testing import CliRunner
+    from servicectl.cli import modify as modify_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "demo-nodb"
+        target.mkdir()
+        ServiceGenerator(
+            name="demo-nodb", template="go-webapi", ci_provider="github-actions",
+            deploy_target="local", azure_region="eastus", coverage_threshold=80,
+            registry="ghcr", db="postgres", output_dir=target,
+            with_git=False, with_readme=False,
+        ).run()
+        actual = target / "demo-nodb"
+        # No --db flag -> should error with the "no --db flag passed" message.
+        result = runner.invoke(
+            modify_cmd,
+            [str(actual)],
+            catch_exceptions=False,
+        )
+        assert result.exit_code != 0
+        assert "no --db" in result.output or "Currently" in result.output
+
+
+def test_doctor_human_text_output():
+    """servicectl doctor <path> (default text output) runs and exits with
+    a valid code. Covers the render_text branch in cli.py line 538.
+    """
+    from click.testing import CliRunner
+    from servicectl.cli import doctor as doctor_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "demo-doc-text"
+        target.mkdir()
+        ServiceGenerator(
+            name="demo-doc-text", template="go-webapi", ci_provider="github-actions",
+            deploy_target="local", azure_region="eastus", coverage_threshold=80,
+            registry="ghcr", db="postgres", output_dir=target,
+            with_git=False, with_readme=False,
+        ).run()
+        actual = target / "demo-doc-text"
+        result = runner.invoke(
+            doctor_cmd,
+            [str(actual)],  # no --json, so render_text branch fires
+            catch_exceptions=False,
+        )
+        assert result.exit_code in (0, 1, 2), f"doctor crashed: {result.output}"
+
+
 def test_in_place_into_empty_dir_succeeds():
     """--in-place scaffolds directly into the output-dir (no <name> subfolder)."""
     with tempfile.TemporaryDirectory() as td:

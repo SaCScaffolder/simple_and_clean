@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Pre-commit hook: run the smoke tests before allowing the commit.
+# Pre-commit hook: run the same smoke tests + coverage gate CI runs on push.
 #
 # Why: catches regressions like the commit 5808d00 / 567509f template fixes
 # landing without a corresponding test update, which broke CI on push.
-# Running the smoke tests pre-commit is ~1s on a warm cache and gives the
-# author the same signal CI will give on push, before the public history
-# is touched.
+# Running the tests + coverage gate pre-commit is ~1-2s on a warm cache and
+# gives the author the same signal CI will give on push, before the public
+# history is touched.
+#
+# Coverage threshold is read from pyproject.toml (--cov-fail-under). If the
+# local checkout fails to meet the threshold, this hook fails the commit.
 #
 # To install (one-time per clone):
 #   git config core.hooksPath .githooks
@@ -31,6 +34,6 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-echo "==> running tests/test_smoke.py (pre-commit hook, python=$PYTHON) ..."
-$PYTHON tests/test_smoke.py
-echo "==> smoke tests passed."
+echo "==> running tests + coverage gate (pre-commit hook, python=$PYTHON) ..."
+$PYTHON -m pytest -q
+echo "==> tests passed and coverage threshold met."
