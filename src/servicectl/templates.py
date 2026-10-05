@@ -34,5 +34,14 @@ def get_template_description(template: str) -> str:
 
 
 def template_path(template: str):
-    """Return a Traversable pointing at the bundled template directory."""
+    """Return a Traversable pointing at the bundled template directory.
+
+    Reads from the source repo location (relative to this module) so that
+    editable installs (`pip install -e .`) see template changes immediately.
+    Falls back to importlib.resources for non-editable installs.
+    """
+    from pathlib import Path
+    src = Path(__file__).resolve().parent / "templates" / template
+    if src.exists():
+        return src
     return resources.files("servicectl").joinpath("templates", template)
