@@ -6,6 +6,9 @@ import axios, { AxiosInstance } from "axios";
  * - baseURL is read from VITE_API_BASE_URL at build time. Vite inlines
  *   any `import.meta.env.VITE_*` reference, so the URL is baked into
  *   the bundle and not configurable at runtime.
+ * - Vite substitutes missing VITE_* vars with the string "undefined"
+ *   (not actual undefined), so we treat both "undefined" and empty
+ *   string the same as missing.
  * - In dev, vite.config.ts proxies /api/* to the backend, so you can
  *   also use baseURL: "/api" to avoid CORS entirely.
  * - In prod, point VITE_API_BASE_URL at the canonical backend URL
@@ -14,20 +17,27 @@ import axios, { AxiosInstance } from "axios";
  * Add auth headers, refresh-token interceptors, or telemetry here so
  * every component gets the same behavior.
  */
+
+const rawBaseUrl = import.meta.env.VITE_API_BASE_URL;
+const baseURL =
+  rawBaseUrl && rawBaseUrl !== "undefined" && rawBaseUrl !== ""
+    ? rawBaseUrl
+    : "/api";
+
 export const apiClient: AxiosInstance = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL ?? "/api",
+  baseURL,
   timeout: 15_000,
   headers: { "Content-Type": "application/json" },
 });
 
-// Example request interceptor — wire auth tokens here when you add them.
+// Example request interceptor - wire auth tokens here when you add them.
 // apiClient.interceptors.request.use((config) => {
 //   const token = localStorage.getItem("auth_token");
 //   if (token) config.headers.Authorization = `Bearer ${token}`;
 //   return config;
 // });
 
-// Example response interceptor — wire global error handling here.
+// Example response interceptor - wire global error handling here.
 // apiClient.interceptors.response.use(
 //   (response) => response,
 //   (error) => {

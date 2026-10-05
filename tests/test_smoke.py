@@ -149,6 +149,17 @@ def test_node_react_web_scaffolds():
         assert (target / "src" / "pages" / "HomePage.tsx").exists()
         assert (target / "src" / "pages" / "NotFoundPage.tsx").exists()
         assert (target / "src" / "api" / "client.ts").exists()
+        # axios baseURL must fall back to "/api" when VITE_API_BASE_URL is unset.
+        # Vite substitutes missing VITE_* vars with the string "undefined" (not
+        # actual undefined), so a naive `?? "/api"` check returns the string
+        # "undefined". The client must explicitly handle that case or every
+        # request becomes `/undefined/...` in production builds.
+        client = (target / "src" / "api" / "client.ts").read_text(encoding="utf-8")
+        assert 'VITE_API_BASE_URL' in client, "client must read VITE_API_BASE_URL"
+        assert '"undefined"' in client or "'undefined'" in client, (
+            "client must guard against Vite's string 'undefined' substitution "
+            "for missing VITE_* env vars"
+        )
         # tests/ tree.
         assert (target / "tests" / "App.test.tsx").exists()
         assert (target / "tests" / "utils.test.ts").exists()
@@ -167,6 +178,13 @@ def test_node_react_web_scaffolds():
         vite = (target / "vite.config.ts").read_text(encoding="utf-8")
         assert "COVERAGE_THRESHOLD" in vite, "coverage gate should be opt-in via COVERAGE_THRESHOLD env var"
         assert "lines: 80" not in vite, "coverage gate should not be unconditional by default"
+        # Triple-slash reference must be present so `tsc -b` sees the `test` config.
+        # Without it, defineConfig() rejects the `test` block with TS2769.
+        assert '/// <reference types="vitest" />' in vite, (
+            "vite.config.ts must have /// <reference types=\"vitest\" /> at the top "
+            "so tsc -b accepts the vitest `test:` block (otherwise build fails with "
+            "TS2769: 'test' does not exist in type 'UserConfigExport')."
+        )
         # README mentions coverage.
         readme = (target / "README.md").read_text(encoding="utf-8")
         assert "80%" in readme
