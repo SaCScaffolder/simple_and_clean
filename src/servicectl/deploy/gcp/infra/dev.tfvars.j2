@@ -1,0 +1,21 @@
+# {{ service_name }} — dev environment
+# Loaded by: terraform apply -var-file=dev.tfvars
+
+project_id  = "{{ gcp_project_id }}"
+region      = "{{ gcp_region }}"
+environment = "dev"
+
+{% if gcp_cloud_run_enabled %}
+# Dev: scale to zero to save cost. Concurrency low; max instances low.
+cloud_run_min_instances = 0
+cloud_run_max_instances = 5
+cloud_run_cpu          = "1"
+cloud_run_memory       = "512Mi"
+cloud_run_concurrency  = 80
+
+env_vars = {
+  LOG_LEVEL  = "debug"
+  ENV        = "dev"
+  # Add non-secret env vars here. Secrets belong in Secret Manager.
+}
+{% endif %}

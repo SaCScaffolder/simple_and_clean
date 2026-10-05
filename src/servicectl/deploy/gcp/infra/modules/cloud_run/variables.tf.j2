@@ -1,0 +1,65 @@
+variable "project_id" {
+  type        = string
+  description = "GCP project ID."
+}
+
+variable "region" {
+  type        = string
+  description = "GCP region for the Cloud Run service."
+}
+
+variable "service_name" {
+  type        = string
+  description = "Base name of the service. The deployed Cloud Run resource will be `<service_name>-<environment>`."
+}
+
+variable "image" {
+  type        = string
+  description = "Container image to deploy."
+}
+
+variable "runtime_sa_email" {
+  type        = string
+  description = "Email of the runtime service account (passed in from root module)."
+}
+
+variable "artifact_registry_repo" {
+  type        = string
+  description = "Name of the Artifact Registry repository."
+}
+
+variable "environment" {
+  type        = string
+  description = "Environment name (dev/staging/prod). Used in resource naming."
+}
+
+variable "min_instance_count" {
+  type        = number
+  description = "Minimum instance count (0 = scale to zero)."
+}
+
+variable "max_instance_count" {
+  type        = number
+  description = "Maximum instance count."
+}
+
+variable "cpu" {
+  type        = string
+  description = "CPU limit per instance (e.g. '1', '2')."
+}
+
+variable "memory" {
+  type        = string
+  description = "Memory limit per instance (e.g. '512Mi', '1Gi')."
+}
+
+variable "concurrency" {
+  type        = number
+  description = "Max concurrent requests per instance."
+}
+
+variable "env_vars" {
+  type        = map(string)
+  description = "Non-secret environment variables to inject into the container."
+  default     = {}
+}

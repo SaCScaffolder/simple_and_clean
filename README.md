@@ -255,10 +255,12 @@ summary: 12/17 passed; 0 errors, 1 warning, 0 info
 servicectl init <name>
   --template=<node-express|node-react-web|python-flask|dotnet-webapi|go-webapi>      [required]
   --ci=<github-actions|azure-devops>                        [default: github-actions]
-  --deploy=<local|azure>                                   [default: local]
+  --deploy=<local|azure|gcp-cloud-run|gcp-gke-autopilot>    [default: local]
   --azure-region=<region>                                   [default: eastus]
+  --gcp-region=<region>                                     [default: us-central1]
+  --gcp-project-id=<project-id>                             GCP project ID, required for --deploy=gcp-*
   --coverage=<0-100>                                        [default: 80]
-  --registry=<dockerhub|ghcr|ecr|acr|gcr>                   [default: ghcr]
+  --registry=<dockerhub|ghcr|ecr|acr|gcr|gar>               [default: ghcr]
   --db=<postgres|mysql|mssql|cosmosdb>                     [default: postgres]
   --output-dir=<path>                                       [default: .]
   --in-place                                                scaffold directly into --output-dir (no <name> subfolder); refuses non-empty dirs

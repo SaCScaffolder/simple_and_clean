@@ -1,0 +1,158 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+env:
+  SERVICE_NAME: {{ service_name }}
+  IMAGE_NAME: {{ image_name }}
+
+jobs:
+  deploy:
+    name: deploy to ${{ '{{' }} inputs.environment || 'dev' {{ '}}' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: {% raw %}${{ inputs.environment || 'dev' }}{% endraw %}
+    permissions:
+      id-token: write   # required for WIF / OIDC federation
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF, no JSON keys)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: {% raw %}${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}{% endraw %}
+          service_account: {% raw %}${{ secrets.GCP_SERVICE_ACCOUNT }}{% endraw %}
+          project_id: {% raw %}${{ secrets.GCP_PROJECT_ID }}{% endraw %}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [ "${{ '{{' }} github.event_name {{ '}}' }}" = "workflow_dispatch" ]; then
+            echo "value=${{ '{{' }} inputs.environment {{ '}}' }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve Artifact Registry hostname
+        id: ar
+        run: |
+          REGION="${{ '{{' }} github.event.repository.name {{ '}}' }}"  # placeholder; replaced below
+          REGION="${GCP_REGION:-{{ gcp_region }}}"
+          PROJECT="{% raw %}${{ secrets.GCP_PROJECT_ID }}{% endraw %}"
+          REPO="{{ service_name }}"
+          echo "host=${REGION}-docker.pkg.dev" >> "$GITHUB_OUTPUT"
+          echo "image=${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image to Artifact Registry
+        run: |
+          set -euo pipefail
+          FULL_IMAGE="${{ '{{' }} steps.ar.outputs.image {{ '}}' }}:${{ '{{' }} steps.tag.outputs.value {{ '}}' }}"
+          docker build -t "${FULL_IMAGE}" -t "${FULL_IMAGE%:*}:latest" .
+          docker push "${FULL_IMAGE}"
+          docker push "${FULL_IMAGE%:*}:latest"
+          echo "IMAGE=${FULL_IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform init
+        working-directory: infra
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          ENV_FILE="{{ '{{' }} inputs.environment || 'dev' {{ '}}' }}.tfvars"
+          terraform plan \
+              -var-file="${ENV_FILE}" \
+              -var="image=${SERVICE_NAME}" \
+              -var="project_id={% raw %}${{ secrets.GCP_PROJECT_ID }}{% endraw %}" \
+              -var="region=${GCP_REGION:-{{ gcp_region }}}" \
+              -out=tfplan
+          echo "PLAN_OK=true" >> "$GITHUB_ENV"
+
+      - name: Terraform apply
+        working-directory: infra
+        if: {% raw %}${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}{% endraw %}
+        run: terraform apply -input=false -auto-approve tfplan
+
+{% if gcp_gke_autopilot_enabled %}
+      - name: Fetch kubeconfig for the Autopilot cluster
+        if: {% raw %}${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}{% endraw %}
+        run: |
+          set -euo pipefail
+          CLUSTER_NAME="$(terraform -chdir=infra output -raw cluster_name)"
+          REGION="${GCP_REGION:-{{ gcp_region }}}"
+          PROJECT="{% raw %}${{ secrets.GCP_PROJECT_ID }}{% endraw %}"
+          gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+              --region "${REGION}" --project "${PROJECT}"
+
+      - name: kustomize-apply manifests
+        if: {% raw %}${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}{% endraw %}
+        run: |
+          set -euo pipefail
+          ENV="{{ '{{' }} inputs.environment || 'dev' {{ '}}' }}"
+          # Inject the freshly-pushed image into the kustomize overlay.
+          cd "k8s/overlays/${ENV}"
+          kustomize edit set image \
+              {{ service_name }}=${{ '{{' }} env.IMAGE {{ '}}' }}
+          kubectl apply -k .
+{% endif %}
+
+      - name: Smoke test
+        if: {% raw %}${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}{% endraw %}
+        run: |
+          set -euo pipefail
+{% if gcp_cloud_run_enabled %}
+          URL="$(terraform -chdir=infra output -raw service_url)"
+{% elif gcp_gke_autopilot_enabled %}
+          URL="$(kubectl get svc -l app={{ service_name }} -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+          if [ -z "$URL" ]; then
+            URL="$(kubectl get svc -l app={{ service_name }} -o jsonpath='{.items[0].spec.clusterIP}')"
+            echo "No external LB; falling back to in-cluster health check via port-forward"
+            kubectl port-forward svc/{{ service_name }} 8080:80 &
+            PF_PID=$!
+            sleep 5
+            for i in {1..30}; do
+              if curl -sf "http://localhost:8080/healthz" >/dev/null; then
+                echo "Health check passed after ${i} attempts"
+                kill $PF_PID 2>/dev/null || true
+                exit 0
+              fi
+              sleep 5
+            done
+            kill $PF_PID 2>/dev/null || true
+            echo "Health check failed after 5 minutes" >&2
+            exit 1
+          fi
+{% endif %}
+          for i in {1..30}; do
+            if curl -sf "https://${URL}/healthz" >/dev/null; then
+              echo "Health check passed after ${i} attempts"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Health check failed after 5 minutes" >&2
+          exit 1

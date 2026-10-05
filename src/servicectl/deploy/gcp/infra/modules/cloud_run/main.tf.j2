@@ -1,0 +1,92 @@
+// Cloud Run module for {{ service_name }}
+// Serverless container with HTTPS, autoscaling, and least-privilege identity.
+
+resource "google_project_service" "cloudrun" {
+  service            = "run.googleapis.com"
+  disable_on_destroy = false
+}
+
+# Allow the runtime SA to be invoked by anyone (public Cloud Run service).
+# Lock this down further with IAM conditions if the service is internal-only.
+resource "google_cloud_run_service" "service" {
+  name     = "{{ service_name }}-${var.environment}"
+  location = var.region
+
+  template {
+    spec {
+      service_account_name = var.runtime_sa_email
+
+      # Scale-to-zero in dev; always-on in staging/prod is controlled by
+      # min_instance_count from the .tfvars file.
+      containers {
+        image = var.image
+
+        resources {
+          limits = {
+            cpu    = var.cpu
+            memory = var.memory
+          }
+        }
+
+        dynamic "env" {
+          for_each = var.env_vars
+          content {
+            name  = env.key
+            value = env.value
+          }
+        }
+      }
+    }
+
+    metadata {
+      annotations = {
+        # Run revisions are immutable; never let Cloud Run pin to "latest"
+        # so we always know which revision is live.
+        "run.googleapis.com/launch-stage" = "GA"
+        "autoscaling.knative.dev/minScale" = var.min_instance_count
+        "autoscaling.knative.dev/maxScale" = var.max_instance_count
+      }
+    }
+  }
+
+  traffic {
+    percent         = 100
+    latest_revision = true
+  }
+
+  lifecycle {
+    # Don't replace on annotation-only changes — Terraform would otherwise
+    # create a new revision for every `terraform apply` even with no real diff.
+    ignore_changes = [
+      template[0].metadata[0].annotations,
+    ]
+  }
+
+  depends_on = [google_project_service.cloudrun]
+}
+
+# Allow unauthenticated public access. Remove for internal-only deployments
+# and bind to specific IAM principals instead.
+data "google_iam_policy" "noauth" {
+  binding {
+    role    = "roles/run.invoker"
+    members = ["allUsers"]
+  }
+}
+
+resource "google_cloud_run_service_iam_policy" "noauth" {
+  location = google_cloud_run_service.service.location
+  project  = google_cloud_run_service.service.project
+  service  = google_cloud_run_service.service.name
+
+  policy_data = data.google_iam_policy.noauth.policy_data
+}
+
+# Allow the runtime SA to pull from Artifact Registry.
+resource "google_artifact_registry_repository_iam_member" "runtime_pull" {
+  project    = var.project_id
+  location   = var.region
+  repository = var.artifact_registry_repo
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${var.runtime_sa_email}"
+}

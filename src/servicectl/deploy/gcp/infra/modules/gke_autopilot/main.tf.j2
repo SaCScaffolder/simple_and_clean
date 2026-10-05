@@ -1,0 +1,37 @@
+// GKE Autopilot module for {{ service_name }}
+// Fully managed Kubernetes. Pay-per-pod, no node management.
+
+resource "google_project_service" "container" {
+  service            = "container.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_container_cluster" "autopilot" {
+  name     = var.cluster_name
+  location = var.region
+
+  enable_autopilot = true
+
+  # Autopilot requires a release channel; BALANCED is the default and what
+  # most teams want. Use STABLE for prod-critical workloads.
+  release_channel {
+    channel = "REGULAR"
+  }
+
+  # Autopilot clusters always run with Dataplane V2 (Cilium-based networking),
+  # so we don't need to set `network_config.datapath_provider` explicitly.
+  # NetworkPolicy resources are fully supported out of the box.
+
+  # Workload Identity must be enabled for the Kubernetes service account to
+  # impersonate the GCP runtime SA. Without this, the pod can't pull from
+  # Artifact Registry or hit any Google API.
+  workload_identity_config {
+    workload_pool = "${var.project_id}.svc.id.goog"
+  }
+
+  # We intentionally disable the legacy ABAC / basic-auth paths.
+  # RBAC is the only auth model.
+  enable_legacy_abac = false
+
+  depends_on = [google_project_service.container]
+}

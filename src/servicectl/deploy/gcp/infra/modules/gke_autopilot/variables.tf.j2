@@ -1,0 +1,29 @@
+variable "project_id" {
+  type        = string
+  description = "GCP project ID."
+}
+
+variable "region" {
+  type        = string
+  description = "GCP region for the Autopilot cluster."
+}
+
+variable "cluster_name" {
+  type        = string
+  description = "Name of the GKE Autopilot cluster."
+}
+
+variable "runtime_sa_email" {
+  type        = string
+  description = "Email of the GCP service account to bind to the Kubernetes runtime SA via Workload Identity."
+}
+
+variable "artifact_registry_repo" {
+  type        = string
+  description = "Name of the Artifact Registry repository (for IAM binding)."
+}
+
+variable "environment" {
+  type        = string
+  description = "Environment name (dev/staging/prod). Used in resource naming."
+}

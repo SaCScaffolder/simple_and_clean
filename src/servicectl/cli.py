@@ -75,7 +75,14 @@ def main() -> None:
     # Until the overlay exists, leaving the option would produce a broken
     # App Service scaffold that calls `az webapp restart` against a
     # non-existent Container App. Re-add when the full overlay ships.
-    type=click.Choice(["local", "azure"], case_sensitive=False),
+    #
+    # GCP deploy targets added 2026-10-03:
+    #   - gcp-cloud-run     : Cloud Run service (serverless container parity with App Service)
+    #   - gcp-gke-autopilot : GKE Autopilot cluster (Kubernetes parity, no node management)
+    type=click.Choice(
+        ["local", "azure", "gcp-cloud-run", "gcp-gke-autopilot"],
+        case_sensitive=False,
+    ),
     default="local",
     show_default=True,
     help="Deployment target.",
@@ -89,6 +96,21 @@ def main() -> None:
     help="Azure region for deploy targets that need one.",
 )
 @click.option(
+    "--gcp-region",
+    "gcp_region",
+    type=str,
+    default="us-central1",
+    show_default=True,
+    help="GCP region for deploy targets that need one.",
+)
+@click.option(
+    "--gcp-project-id",
+    "gcp_project_id",
+    type=str,
+    default=None,
+    help="GCP project ID (required for --deploy=gcp-*). Rendered into the Terraform variables file.",
+)
+@click.option(
     "--coverage",
     "coverage_threshold",
     type=click.IntRange(min=0, max=100),
@@ -99,10 +121,13 @@ def main() -> None:
 @click.option(
     "--registry",
     "registry",
-    type=click.Choice(["dockerhub", "ghcr", "ecr", "acr", "gcr"], case_sensitive=False),
+    type=click.Choice(
+        ["dockerhub", "ghcr", "ecr", "acr", "gcr", "gar"],
+        case_sensitive=False,
+    ),
     default="ghcr",
     show_default=True,
-    help="Container registry.",
+    help="Container registry. `gar` = Google Artifact Registry (recommended for GCP deploys); `gcr` is the legacy Container Registry.",
 )
 @click.option(
     "--db",
@@ -130,6 +155,8 @@ def init(
     ci_provider: str,
     deploy_target: str,
     azure_region: str,
+    gcp_region: str,
+    gcp_project_id: str | None,
     coverage_threshold: int,
     registry: str,
     db: str,
@@ -147,6 +174,8 @@ def init(
             ci_provider=ci_provider,
             deploy_target=deploy_target,
             azure_region=azure_region,
+            gcp_region=gcp_region,
+            gcp_project_id=gcp_project_id,
             coverage_threshold=coverage_threshold,
             registry=registry,
             db=db,
@@ -172,6 +201,26 @@ def init(
             "      --template-file infra/main.bicep \\\n"
             "      --parameters infra/dev.bicepparam"
         )
+    elif deploy_target == "gcp-cloud-run":
+        deploy_hint = (
+            "  # One-time per project: bootstrap WIF + service account\n"
+            "  gcloud auth login\n"
+            "  gcloud config set project <your-gcp-project-id>\n"
+            "  bash infra/bootstrap.sh\n"
+            "\n"
+            "  # Then push: CI uses WIF, no JSON keys needed.\n"
+            "  git remote add origin <your-repo-url> && git push -u origin main"
+        )
+    elif deploy_target == "gcp-gke-autopilot":
+        deploy_hint = (
+            "  # One-time per project: bootstrap WIF + GKE Autopilot cluster\n"
+            "  gcloud auth login\n"
+            "  gcloud config set project <your-gcp-project-id>\n"
+            "  bash infra/bootstrap.sh\n"
+            "\n"
+            "  # Then push: CI uses WIF to build, push, and kustomize-apply.\n"
+            "  git remote add origin <your-repo-url> && git push -u origin main"
+        )
     else:
         deploy_hint = ""
 
@@ -182,7 +231,13 @@ def init(
             f"  template:    {template}\n"
             f"  ci:          {ci_provider}\n"
             f"  deploy:      {deploy_target}"
-            + (f" ({azure_region})" if deploy_target.startswith("azure") else "")
+            + (
+                f" ({azure_region})"
+                if deploy_target.startswith("azure")
+                else f" ({gcp_region}, project {gcp_project_id or '<set --gcp-project-id>'})"
+                if deploy_target.startswith("gcp-")
+                else ""
+            )
             + f"\n"
             f"  coverage:    {coverage_threshold}%\n"
             f"  registry:    {registry}\n"

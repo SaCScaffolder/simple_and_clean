@@ -63,8 +63,17 @@ class ServiceGenerator:
     output_dir: Path
     with_git: bool
     with_readme: bool
+    # GCP defaults are set so older tests that construct ServiceGenerator
+    # without the new GCP flags keep working. CLI flags override these.
+    gcp_region: str = "us-central1"
+    gcp_project_id: str | None = None
     in_place: bool = False
     git_remote: str | None = None
+
+    # Deploy targets known to the scaffolder. The Azure overlay is in
+    # `deploy/azure/`; the GCP overlay is in `deploy/gcp/` and contains
+    # Terraform modules for both `gcp-cloud-run` and `gcp-gke-autopilot`.
+    _DEPLOY_TARGETS = {"local", "azure", "gcp-cloud-run", "gcp-gke-autopilot"}
 
     def _validate(self) -> None:
         if not self.name or self.name.strip() == "":
@@ -76,8 +85,15 @@ class ServiceGenerator:
             raise ScaffoldError(f"service name contains invalid character(s): {sorted(bad & set(self.name))}")
         if self.template not in list_templates():
             raise ScaffoldError(f"unknown template: {self.template!r}")
-        if self.deploy_target not in {"local", "azure"}:
-            raise ScaffoldError(f"unknown deploy target: {self.deploy_target!r}")
+        if self.deploy_target not in self._DEPLOY_TARGETS:
+            raise ScaffoldError(
+                f"unknown deploy target: {self.deploy_target!r} "
+                f"(allowed: {sorted(self._DEPLOY_TARGETS)})"
+            )
+        # Note: --gcp-project-id is optional at scaffold time because the
+        # rendered `infra/*.tfvars` files can be edited before `terraform apply`.
+        # We default to a placeholder string when the user didn't pass one;
+        # `bootstrap.sh` will refuse to run until the placeholder is replaced.
         if self.db not in SUPPORTED_DBS:
             raise ScaffoldError(f"unsupported --db: {self.db!r} (allowed: {sorted(SUPPORTED_DBS)})")
         # --git-remote requires https:// (SSH not supported in v1).
@@ -109,6 +125,12 @@ class ServiceGenerator:
 
     def _render_context(self) -> dict[str, object]:
         db_meta = SUPPORTED_DBS[self.db]
+        # GCP overlay knows about two flavors. Both share the same Terraform
+        # module layout; only `gcp_cloud_run_enabled` and `gcp_gke_autopilot_enabled`
+        # differ so the right resources light up in the rendered `.tf`.
+        is_gcp_cloud_run = self.deploy_target == "gcp-cloud-run"
+        is_gcp_gke_autopilot = self.deploy_target == "gcp-gke-autopilot"
+        is_gcp = is_gcp_cloud_run or is_gcp_gke_autopilot
         return {
             "service_name": self.name,
             "service_name_snake": self.name.replace("-", "_").replace(".", "_"),
@@ -118,6 +140,10 @@ class ServiceGenerator:
             "ci_provider": self.ci_provider,
             "deploy_target": self.deploy_target,
             "azure_region": self.azure_region,
+            "gcp_region": self.gcp_region,
+            "gcp_project_id": self.gcp_project_id or "REPLACE_WITH_GCP_PROJECT_ID",
+            "gcp_cloud_run_enabled": is_gcp_cloud_run,
+            "gcp_gke_autopilot_enabled": is_gcp_gke_autopilot,
             "coverage_threshold": self.coverage_threshold,
             "registry": self.registry,
             "db": self.db,
@@ -196,11 +222,17 @@ class ServiceGenerator:
             else:
                 copied_count += 1
 
-        # Optionally overlay deploy-specific files. Today we only ship an
-        # `infra/` overlay for the Azure targets. Keeping it separate lets us
-        # add AWS/GCP overlays later without bloating the per-template trees.
-        if self.deploy_target.startswith("azure"):
-            overlay_root = resources.files("servicectl").joinpath("deploy", "azure")
+        # Optionally overlay deploy-specific files. Today we ship overlays for
+        # the Azure and GCP deploy targets. Keeping overlays out of the
+        # per-template trees lets us add AWS / GKE-on-non-Autopilot later
+        # without bloating any one template.
+        if self.deploy_target.startswith("azure") or self.deploy_target.startswith("gcp-"):
+            overlay_subdir = (
+                "azure"
+                if self.deploy_target.startswith("azure")
+                else "gcp"
+            )
+            overlay_root = resources.files("servicectl").joinpath("deploy", overlay_subdir)
             if overlay_root.is_dir():
                 # Overlay uses a fresh Jinja environment rooted at the overlay
                 # directory so it can find its own templates (separate path
