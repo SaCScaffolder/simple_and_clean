@@ -42,3 +42,11 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 servicectl = ["templates/**/*", "deploy/**/*"]
+
+# Pytest configuration. The --cov flags and threshold here are what CI
+# enforces on push; the .githooks/pre-commit hook runs the same command so
+# local matches remote (per the contract documented in 5808d00 / fd66c5d).
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-ra --cov=servicectl --cov-report=term --cov-report=term-missing --cov-fail-under=80"
+testpaths = ["tests"]
