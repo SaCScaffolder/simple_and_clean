@@ -5,6 +5,7 @@ Run with: pytest tests/ (or just `python tests/test_smoke.py`).
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -506,6 +507,192 @@ def test_scaffolded_services_ship_githooks_pre_commit():
                 f"template {tpl!r} hook missing install hint.\n"
                 f"Got:\n{content}"
             )
+
+
+def test_init_from_config_loads_json_and_scaffolds():
+    """--from-config=<path.json> should drive `servicectl init` end-to-end.
+    The JSON file holds the same keys as the CLI flags. CLI flags that the
+    user passes on the command line take precedence over JSON values.
+    """
+    from click.testing import CliRunner
+    from servicectl.cli import init as init_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        cfg = Path(td) / "spec.json"
+        cfg.write_text(json.dumps({
+            "name": "from-config-svc",
+            "template": "go-webapi",
+            "ci_provider": "github-actions",
+            "deploy_target": "local",
+            "azure_region": "eastus",
+            "gcp_region": "us-central1",
+            "coverage_threshold": 80,
+            "registry": "ghcr",
+            "db": "postgres",
+        }), encoding="utf-8")
+        out = Path(td) / "out"
+        out.mkdir()
+        result = runner.invoke(
+            init_cmd,
+            [
+                "--from-config", str(cfg),
+                "--output-dir", str(out),
+                "--no-git",
+                "--no-readme",
+            ],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"init failed: {result.output}"
+        target = out / "from-config-svc"
+        assert target.exists()
+        assert (target / "go.mod").exists()
+        gomod = (target / "go.mod").read_text(encoding="utf-8")
+        assert "from-config-svc" in gomod, (
+            "service name from JSON was not substituted into go.mod; "
+            "--from-config did not flow through to ServiceGenerator."
+        )
+
+
+def test_init_from_config_cli_flag_overrides_json():
+    """Explicit CLI flags win over --from-config JSON values."""
+    from click.testing import CliRunner
+    from servicectl.cli import init as init_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        cfg = Path(td) / "spec.json"
+        cfg.write_text(json.dumps({
+            "name": "from-json",
+            "template": "go-webapi",
+            "ci_provider": "github-actions",
+            "deploy_target": "local",
+            "azure_region": "eastus",
+            "coverage_threshold": 80,
+            "registry": "ghcr",
+            "db": "postgres",
+        }), encoding="utf-8")
+        out = Path(td) / "out"
+        out.mkdir()
+        # CLI passes --coverage=95; JSON has 80. CLI must win.
+        result = runner.invoke(
+            init_cmd,
+            [
+                "--from-config", str(cfg),
+                "--coverage", "95",
+                "--output-dir", str(out),
+                "--no-git",
+                "--no-readme",
+            ],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"init failed: {result.output}"
+        # Look at the README or the rendered README content for the coverage.
+        # Without --no-readme the value lands in README and config files.
+        # Easier to check: read the rendered coverage_threshold in the
+        # rendered scaffold's README (pyproject.toml for python-flask etc.)
+        # For go-webapi, coverage lives in .github/workflows/ci.yml.
+        ci_yml = (out / "from-json" / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        assert "95" in ci_yml, (
+            f"CLI --coverage=95 should have overridden JSON 80 in rendered CI; "
+            f"got:\n{ci_yml}"
+        )
+
+
+def test_init_from_config_missing_name_errors():
+    """If neither the NAME argument nor --from-config supplies a name, error.
+    Click's `required=True` only catches missing CLI args, so this test
+    covers the post-merge validation we added for the JSON path.
+    """
+    from click.testing import CliRunner
+    from servicectl.cli import init as init_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        cfg = Path(td) / "spec.json"
+        cfg.write_text(json.dumps({
+            "template": "go-webapi",
+            "ci_provider": "github-actions",
+            "deploy_target": "local",
+            "azure_region": "eastus",
+            "coverage_threshold": 80,
+            "registry": "ghcr",
+            "db": "postgres",
+        }), encoding="utf-8")
+        result = runner.invoke(
+            init_cmd,
+            ["--from-config", str(cfg), "--no-git"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code != 0
+        assert "name" in result.output.lower()
+
+
+def test_init_from_config_unknown_key_errors_with_strict_flag():
+    """--strict-config with an unknown JSON key should error (exit != 0)."""
+    from click.testing import CliRunner
+    from servicectl.cli import init as init_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        cfg = Path(td) / "spec.json"
+        cfg.write_text(json.dumps({
+            "name": "x",
+            "template": "go-webapi",
+            "ci_provider": "github-actions",
+            "deploy_target": "local",
+            "azure_region": "eastus",
+            "coverage_threshold": 80,
+            "registry": "ghcr",
+            "db": "postgres",
+            "totally_made_up_key": "value",
+        }), encoding="utf-8")
+        result = runner.invoke(
+            init_cmd,
+            ["--from-config", str(cfg), "--strict-config", "--no-git"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code != 0
+        assert "totally_made_up_key" in result.output
+
+
+def test_init_from_config_unknown_key_silently_dropped_by_default():
+    """Without --strict-config, unknown JSON keys are silently dropped (not an error).
+    This keeps the JSON spec forward-compatible with new CLI options.
+    """
+    from click.testing import CliRunner
+    from servicectl.cli import init as init_cmd
+
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        cfg = Path(td) / "spec.json"
+        cfg.write_text(json.dumps({
+            "name": "x",
+            "template": "go-webapi",
+            "ci_provider": "github-actions",
+            "deploy_target": "local",
+            "azure_region": "eastus",
+            "coverage_threshold": 80,
+            "registry": "ghcr",
+            "db": "postgres",
+            "future_option": "future_value",
+        }), encoding="utf-8")
+        out = Path(td) / "out"
+        out.mkdir()
+        result = runner.invoke(
+            init_cmd,
+            [
+                "--from-config", str(cfg),
+                "--output-dir", str(out),
+                "--no-git",
+                "--no-readme",
+            ],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, (
+            f"unknown keys should be silently dropped without --strict-config; "
+            f"got exit={result.exit_code}, output:\n{result.output}"
+        )
 
 
 def test_in_place_into_empty_dir_succeeds():

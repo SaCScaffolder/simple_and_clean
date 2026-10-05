@@ -2,12 +2,14 @@
 
 Usage:
     servicectl init <name> --template=<template> [flags]
+    servicectl init --from-config=<path.json> [overrides]
 
 Run `servicectl init --help` for the full flag list.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -52,11 +54,14 @@ def main() -> None:
 
 
 @main.command()
-@click.argument("name")
+@click.argument(
+    "name",
+    required=False,  # Optional when --from-config provides it.
+)
 @click.option(
     "--template",
     "template",
-    required=True,
+    required=False,  # Required when --from-config is not used; checked after merge.
     type=click.Choice(list_templates(), case_sensitive=False),
     help="Service template to scaffold.",
 )
@@ -149,6 +154,22 @@ def main() -> None:
 @click.option("--no-readme", "no_readme", is_flag=True, help="Skip README generation (not recommended).")
 @click.option("--git-remote", "git_remote", type=str, default=None, help="HTTPS URL of a git remote to add as `origin` and push the initial commit to. Requires --no-git NOT to be set. Must start with https://.")
 @click.option("--in-place", "in_place", is_flag=True, help="Scaffold directly into --output-dir instead of creating a <name> subfolder. Refuses to overwrite a non-empty directory.")
+@click.option(
+    "--from-config",
+    "from_config",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Load init flags from a JSON file. JSON keys are the same as the CLI flag names "
+         "(e.g. 'template', 'ci_provider', 'deploy_target'). CLI flags override JSON values; "
+         "JSON values override built-in defaults. Schema: a flat JSON object. Use "
+         "--strict-config to error on unknown keys.",
+)
+@click.option(
+    "--strict-config",
+    "strict_config",
+    is_flag=True,
+    help="With --from-config, error on unknown JSON keys instead of silently dropping them.",
+)
 def init(
     name: str,
     template: str,
@@ -165,8 +186,110 @@ def init(
     no_git: bool,
     no_readme: bool,
     git_remote: str | None,
+    from_config: Path | None,
+    strict_config: bool,
 ) -> None:
     """Scaffold a new service named NAME."""
+    # Merge --from-config JSON values with CLI flags.
+    # Precedence (highest first): CLI flag (explicit) > JSON value > CLI default.
+    # We use Click's parameter_source API to know which CLI flags were
+    # passed explicitly by the user vs left at their default.
+    if from_config is not None:
+        try:
+            with from_config.open(encoding="utf-8") as f:
+                file_cfg = json.load(f)
+        except json.JSONDecodeError as e:
+            err_console.print(
+                f"[bold red]error:[/bold red] --from-config {from_config} is not valid JSON: {e}"
+            )
+            sys.exit(2)
+        except OSError as e:
+            err_console.print(
+                f"[bold red]error:[/bold red] could not read --from-config {from_config}: {e}"
+            )
+            sys.exit(2)
+
+        if not isinstance(file_cfg, dict):
+            err_console.print(
+                f"[bold red]error:[/bold red] --from-config {from_config} must contain a JSON object, "
+                f"got {type(file_cfg).__name__}"
+            )
+            sys.exit(2)
+
+        # Map of CLI option name -> ServiceGenerator kwarg name. Must stay
+        # in sync with the options above. If you add a new option, add it here too.
+        cli_to_kwarg = {
+            "name": "name",
+            "template": "template",
+            "ci_provider": "ci_provider",
+            "deploy_target": "deploy_target",
+            "azure_region": "azure_region",
+            "gcp_region": "gcp_region",
+            "gcp_project_id": "gcp_project_id",
+            "coverage_threshold": "coverage_threshold",
+            "registry": "registry",
+            "db": "db",
+            "output_dir": "output_dir",
+            "in_place": "in_place",
+            "git_remote": "git_remote",
+        }
+        allowed_keys = set(cli_to_kwarg.keys())
+        unknown_keys = set(file_cfg.keys()) - allowed_keys
+        if unknown_keys:
+            if strict_config:
+                err_console.print(
+                    f"[bold red]error:[/bold red] --from-config contains unknown keys: "
+                    f"{sorted(unknown_keys)}. Allowed: {sorted(allowed_keys)}."
+                )
+                sys.exit(2)
+            # Non-strict: silently drop. (Keeps the JSON future-proof against
+            # new options being added before this CLI catches up.)
+            for k in unknown_keys:
+                del file_cfg[k]
+
+        # Click tracks which params were passed on the command line vs which
+        # took their default. CLI flag wins; otherwise JSON value wins.
+        ctx = click.get_current_context()
+        for cli_name, kwarg_name in cli_to_kwarg.items():
+            if ctx.get_parameter_source(cli_name) != click.core.ParameterSource.DEFAULT:
+                # Explicit CLI flag wins; leave ctx.params[cli_name] alone.
+                continue
+            if kwarg_name in file_cfg:
+                ctx.params[cli_name] = file_cfg[kwarg_name]
+
+        # Re-bind locals to the (possibly updated) ctx.params values so the
+        # rest of init() sees the merged result. We do this by reading them
+        # back out of ctx.params.
+        name = ctx.params["name"]
+        template = ctx.params["template"]
+        ci_provider = ctx.params["ci_provider"]
+        deploy_target = ctx.params["deploy_target"]
+        azure_region = ctx.params["azure_region"]
+        gcp_region = ctx.params["gcp_region"]
+        gcp_project_id = ctx.params["gcp_project_id"]
+        coverage_threshold = ctx.params["coverage_threshold"]
+        registry = ctx.params["registry"]
+        db = ctx.params["db"]
+        output_dir = ctx.params["output_dir"]
+        in_place = ctx.params["in_place"]
+        git_remote = ctx.params["git_remote"]
+
+        # After merging JSON + defaults, validate that required keys landed.
+        # Click's `required=True` only catches missing CLI flags; it doesn't
+        # know whether --from-config supplied the value.
+        if not name:
+            err_console.print(
+                "[bold red]error:[/bold red] 'name' is required. Pass it as the NAME "
+                "argument or include it in --from-config JSON."
+            )
+            sys.exit(2)
+        if not template:
+            err_console.print(
+                "[bold red]error:[/bold red] --template is required (or include it in "
+                "--from-config JSON)."
+            )
+            sys.exit(2)
+
     try:
         gen = ServiceGenerator(
             name=name,

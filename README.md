@@ -213,6 +213,29 @@ servicectl doctor my-service --strict   # warnings count as errors (CI gate)
 servicectl doctor my-service --pause    # wait for keypress before exit (for shortcut launches)
 ```
 
+## Loading flags from a JSON file
+
+For machine-generated scaffolding specs (PowerShell wrappers, CI pipelines, ops scripts)
+you can drive `servicectl init` from a JSON file instead of (or alongside) CLI flags:
+
+```bash
+# spec.json: { "name": "my-svc", "template": "go-webapi", "deploy_target": "gcp-cloud-run", "gcp_project_id": "my-proj", ... }
+servicectl init --from-config=spec.json --output-dir=. --in-place
+
+# Override individual flags on the command line - they win over the JSON
+servicectl init --from-config=spec.json --coverage=95
+
+# Strict mode: error on unknown JSON keys (off by default for forward compat)
+servicectl init --from-config=spec.json --strict-config
+```
+
+JSON keys are the same as the CLI option names (`name`, `template`, `ci_provider`,
+`deploy_target`, `azure_region`, `gcp_region`, `gcp_project_id`, `coverage_threshold`,
+`registry`, `db`, `output_dir`, `in_place`, `git_remote`). **Precedence** is:
+explicit CLI flag > JSON value > built-in default. With `--strict-config`, unknown
+keys error; without it, they're silently dropped so specs stay forward-compatible
+when new options are added.
+
 ## Validating existing services with `doctor`
 
 `servicectl doctor` checks an existing scaffolded service against the
