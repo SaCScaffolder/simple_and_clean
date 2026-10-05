@@ -46,6 +46,17 @@ if [ -f package.json ]; then
     npm run typecheck
   fi
   npm test
+
+  # Coverage gate. vitest --coverage writes coverage/coverage-summary.json
+  # (the summary block). Read total.lines.pct and fail if below threshold.
+  THRESHOLD=${COVERAGE_THRESHOLD:-80}
+  if [ -f coverage/coverage-summary.json ]; then
+    PCT=$(python -c "import json; d=json.load(open('coverage/coverage-summary.json')); print(d['total']['lines']['pct'])" 2>/dev/null || echo "0")
+    echo "==> total coverage: ${PCT}% (threshold: ${THRESHOLD}%)"
+    awk -v want="$THRESHOLD" -v got="$PCT" 'BEGIN { if (got+0 < want+0) { printf("FAIL: coverage is %s%%, threshold is %s%%\n", got, want); exit 1 } }'
+  else
+    echo "==> WARNING: no coverage/coverage-summary.json found; skipping coverage gate."
+  fi
 fi
 {% elif template == "python-flask" %}
 # Python service: run pytest with coverage gate.

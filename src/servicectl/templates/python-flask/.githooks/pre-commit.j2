@@ -50,7 +50,11 @@ fi
 {% elif template == "python-flask" %}
 # Python service: run pytest with coverage gate.
 if [ -n "$PYTHON" ] && [ -f pyproject.toml ]; then
-  $PYTHON -m pytest -q
+  # Threshold default to 80%; override with COVERAGE_THRESHOLD env var.
+  # pyproject.toml's pytest addopts should pick this up if it references
+  # the env var, or the user can set --cov-fail-under directly there.
+  THRESHOLD=${COVERAGE_THRESHOLD:-80}
+  COVERAGE_THRESHOLD="$THRESHOLD" $PYTHON -m pytest -q
 fi
 {% elif template == "dotnet-webapi" %}
 # .NET service: run dotnet test with coverage gate (Threshold from csproj).
