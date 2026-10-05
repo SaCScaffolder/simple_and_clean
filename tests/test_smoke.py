@@ -161,9 +161,12 @@ def test_node_react_web_scaffolds():
         for rel in ("src/App.tsx", "src/pages/HomePage.tsx", "src/components/Layout.tsx"):
             text = (target / rel).read_text(encoding="utf-8")
             assert "demo-react" in text, f"service name not substituted in {rel}"
-        # Coverage threshold should be in vite.config.ts.
+        # Coverage gate is opt-in via COVERAGE_THRESHOLD env var, not unconditional.
+        # (See commit 5808d00 — unconditional 80% gate was a lie on a contract
+        # that ships with no tests.)
         vite = (target / "vite.config.ts").read_text(encoding="utf-8")
-        assert "lines: 80" in vite
+        assert "COVERAGE_THRESHOLD" in vite, "coverage gate should be opt-in via COVERAGE_THRESHOLD env var"
+        assert "lines: 80" not in vite, "coverage gate should not be unconditional by default"
         # README mentions coverage.
         readme = (target / "README.md").read_text(encoding="utf-8")
         assert "80%" in readme

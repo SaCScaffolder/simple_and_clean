@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Pre-commit hook: run the smoke tests before allowing the commit.
+#
+# Why: catches regressions like the commit 5808d00 / 567509f template fixes
+# landing without a corresponding test update, which broke CI on push.
+# Running the smoke tests pre-commit is ~1s on a warm cache and gives the
+# author the same signal CI will give on push, before the public history
+# is touched.
+#
+# To install (one-time per clone):
+#   git config core.hooksPath .githooks
+#
+# To bypass in an emergency (e.g., WIP commit):
+#   git commit --no-verify -m "..."
+
+set -euo pipefail
+
+# Find a python interpreter. Prefer python3 (unix), fall back to python
+# (Windows default), fall back to py launcher (Windows python.org install).
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON=python3
+elif command -v python >/dev/null 2>&1; then
+  PYTHON=python
+elif command -v py >/dev/null 2>&1; then
+  PYTHON=py
+else
+  echo "fatal: no python interpreter found in PATH" >&2
+  exit 1
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+echo "==> running tests/test_smoke.py (pre-commit hook, python=$PYTHON) ..."
+$PYTHON tests/test_smoke.py
+echo "==> smoke tests passed."
