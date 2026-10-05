@@ -383,20 +383,28 @@ def init(
     required=False,
 )
 @click.option(
-    "--strict",
-    is_flag=True,
-    help="Treat warnings as errors (exit 2 if any warnings exist).",
+    "--db",
+    "db",
+    type=click.Choice(["postgres", "mysql", "mssql", "cosmosdb"], case_sensitive=False),
+    default=None,
+    help="Database backend to switch to.",
 )
 @click.option(
-    "--json",
-    "as_json",
+    "--show",
+    "show_only",
     is_flag=True,
-    help="Output JSON instead of human-readable text (useful in CI).",
+    help="Print the current settings and exit without making changes.",
 )
 @click.option(
-    "--pause",
+    "--dry-run",
     is_flag=True,
-    help="Wait for a keypress before exiting (useful when launched from a shortcut so the window doesn't close immediately).",
+    help="Show what would change without writing any files.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip the interactive confirmation prompt.",
 )
 def modify(
     path: Path,
@@ -505,6 +513,16 @@ def modify(
         console.print(f"  - {rel}")
 
 
+@main.command()
+@click.argument(
+    "path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=Path("."),
+    required=False,
+)
+@click.option("--strict", is_flag=True, help="Treat warnings as errors (exit 2 if any warnings exist).")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON instead of human-readable text (useful in CI).")
+@click.option("--pause", is_flag=True, help="Wait for a keypress before exiting (useful when launched from a shortcut so the window doesn't close immediately).")
 def doctor(path: Path, strict: bool, as_json: bool, pause: bool) -> None:
     """Validate an existing scaffolded service against servicectl standards.
 
