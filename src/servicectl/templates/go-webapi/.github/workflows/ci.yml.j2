@@ -71,7 +71,11 @@ jobs:
       - name: Scan image (Trivy)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: {% raw %}$IMAGE_NAME:${{ github.sha }}{% endraw %}
+          # Use ${{ env.IMAGE_NAME }} instead of $IMAGE_NAME so GitHub
+          # Actions expands the env var. The bare `$VAR` form only works
+          # in `run:` blocks; in `with:` values it stays literal and
+          # trivy fails with "could not parse reference".
+          image-ref: {% raw %}${{ env.IMAGE_NAME }}:${{ github.sha }}{% endraw %}
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
