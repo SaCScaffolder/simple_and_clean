@@ -50,3 +50,11 @@ servicectl = ["templates/**/*", "deploy/**/*"]
 pythonpath = ["src"]
 addopts = "-ra --cov=servicectl --cov-report=term --cov-report=term-missing --cov-fail-under=80"
 testpaths = ["tests"]
+markers = [
+    # `slow` marks integration tests that touch external processes (git
+    # subprocess, real filesystems) and are known-flaky under git's
+    # pre-commit-hook invocation on some platforms. The pre-commit hook
+    # excludes these with `-m "not slow"`; CI runs everything. See
+    # `.githooks/pre-commit` and the changelog entry on the #48 commit.
+    "slow: integration tests that touch git subprocess; skipped by pre-commit hook",
+]

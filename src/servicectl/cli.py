@@ -28,6 +28,12 @@ from .doctor import (
 )
 from .generator import ServiceGenerator, ScaffoldError
 from .modifier import ModifierError, ServiceModifier
+from .replay import (
+    RefreshConflict,
+    RefreshConfigMissing,
+    RefreshNotScaffoldedError,
+)
+from .sac_config import SacConfig, write_config
 from .templates import list_templates
 
 # Force UTF-8 so Rich's Unicode glyphs (✓, →) don't choke on Windows cp1252 consoles.
@@ -555,6 +561,140 @@ def doctor(path: Path, strict: bool, as_json: bool, pause: bool) -> None:
         sys.exit(EXIT_ERROR)
     else:
         sys.exit(report.exit_code())
+
+
+@main.command()
+@click.argument(
+    "repo",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=Path("."),
+    required=False,
+)
+@click.option("--dry-run", is_flag=True, help="Print the refresh plan and exit without making changes.")
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip the interactive confirmation prompt.",
+)
+def refresh(repo: Path, dry_run: bool, yes: bool) -> None:
+    """Refresh an existing scaffolded service against the current simple_and_clean.
+
+    Classifies the repo's commits into SAC-managed (filtered out) and
+    developer (preserved) buckets, regenerates the scaffold from the
+    latest template set, and replays the developer commits on top.
+
+    The original branch is untouched until success; on conflict the
+    recovery ref `sac/pre-refresh-<id>` points at the pre-refresh HEAD
+    so you can roll back with `git update-ref`.
+
+    Requires a `.servicectl.json` in the service root (written by
+    `servicectl init`). Without it, refresh refuses to guess the
+    template/deploy/registry flags -- a wrong guess would silently
+    change the service.
+    """
+    from .replay import refresh as replay_refresh
+
+    # Lazy import to keep `servicectl --help` fast and to avoid a circular
+    # import risk (replay -> generator -> sac_trailers at module-load time).
+    try:
+        run = replay_refresh(repo, dry_run=dry_run)
+    except RefreshNotScaffoldedError as e:
+        err_console.print(f"[bold red]error:[/bold red] {e}")
+        sys.exit(2)
+    except RefreshConfigMissing as e:
+        err_console.print(f"[bold red]error:[/bold red] {e}")
+        sys.exit(2)
+    except RefreshConflict as e:
+        err_console.print(
+            Panel(
+                f"[bold red]refresh halted: cherry-pick conflict[/bold red]\n\n"
+                f"  conflicting files ({len(e.conflicting_files)}):\n"
+                + "\n".join(f"    - {f}" for f in e.conflicting_files)
+                + f"\n\n"
+                f"  recovery ref: [cyan]{e.recovery_ref}[/cyan]\n"
+                f"  recover with:  git update-ref refs/heads/<branch> {e.recovery_ref}",
+                title="refresh failed",
+                border_style="red",
+            )
+        )
+        sys.exit(2)
+
+    if dry_run:
+        cfg = run.config
+        cfg_lines = (
+            f"  template:    {cfg.template}\n"
+            f"  ci:          {cfg.ci_provider}\n"
+            f"  deploy:      {cfg.deploy_target}\n"
+            f"  registry:    {cfg.registry}\n"
+            f"  coverage:    {cfg.coverage_threshold}%\n"
+            f"  db:          {cfg.db}\n"
+            if cfg is not None
+            else "  config:      <missing --refresh needs .servicectl.json>\n"
+        )
+        console.print(
+            Panel(
+                f"[bold]refresh plan (dry run)[/bold]\n\n"
+                f"  repo:           {repo}\n"
+                f"  base branch:    {run.base_branch}\n"
+                f"  worktree:       {run.worktree_dir}\n"
+                f"  recovery ref:   {run.recovery_ref}\n"
+                f"  scaffold sha:   {run.scaffold_sha or '(would be regenerated)'}\n"
+                f"  developer commits: {len(run.developer_commits)}\n\n"
+                f"[bold]SAC config (from .servicectl.json):[/bold]\n"
+                f"{cfg_lines}\n"
+                f"[bold]Next steps:[/bold]\n"
+                f"  servicectl refresh {repo}    # for real",
+                title="refresh plan",
+                border_style="cyan",
+            )
+        )
+        return
+
+    if not yes:
+        console.print(
+            Panel(
+                f"[bold]About to refresh {repo}[/bold]\n\n"
+                f"  base branch:    {run.base_branch}\n"
+                f"  worktree:       {run.worktree_dir}\n"
+                f"  recovery ref:   {run.recovery_ref}\n"
+                f"  developer commits: {len(run.developer_commits)}\n\n"
+                f"The worktree branch will be fast-forwarded into {run.base_branch} on success.\n"
+                f"On conflict, {run.recovery_ref} lets you roll back.\n\n"
+                f"Proceed? [y/N]",
+                title="refresh confirmation",
+                border_style="yellow",
+            )
+        )
+        try:
+            response = input().strip().lower()
+        except EOFError:
+            response = "n"
+        if response != "y":
+            console.print("[yellow]Aborted; no changes made.[/yellow]")
+            return
+
+    if run.succeeded:
+        console.print(
+            Panel(
+                f"[bold green]✓[/bold green] refresh complete\n\n"
+                f"  scaffold sha:   {run.scaffold_sha}\n"
+                f"  developer commits replayed: {len(run.developer_commits)}\n"
+                f"  worktree:       {run.worktree_dir}\n"
+                f"  recovery ref:   {run.recovery_ref}\n\n"
+                f"The worktree is ready to merge or fast-forward into {run.base_branch}.",
+                title="refresh succeeded",
+                border_style="green",
+            )
+        )
+    else:
+        # Defensive: replay_refresh() raises on failure, so we shouldn't get
+        # here. If we do, surface it cleanly.
+        err_console.print(
+            "[bold red]error:[/bold red] refresh returned a non-success state without raising; "
+            "this is a bug in servicectl."
+        )
+        sys.exit(2)
 
 
 if __name__ == "__main__":

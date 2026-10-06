@@ -36,12 +36,14 @@ ref name so callers can inspect them after a refresh attempt.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .sac_trailers import classify_history, is_sac_managed
+from .sac_config import SacConfig, read_config, CONFIG_FILENAME
 
 
 # ----- errors -----
@@ -78,6 +80,21 @@ class RefreshNotScaffoldedError(RefreshError):
     """
 
 
+class RefreshConfigMissing(RefreshError):
+    """The repo's `.servicectl.json` (the SAC config file) is missing.
+
+    Refresh needs to know which template, deploy target, registry, etc.
+    produced the service to regenerate the scaffold against the latest
+    simple_and_clean release. Without the config it would have to guess,
+    and a wrong guess would silently change the service.
+
+    Mitigation: regenerate from a known template/flags via `servicectl
+    init --from-config <path>` and commit the resulting `.servicectl.json`.
+    Or pass `--from-config` to `servicectl refresh` pointing at a
+    manually-curated JSON config.
+    """
+
+
 # ----- run state -----
 
 
@@ -99,6 +116,10 @@ class RefreshRun:
         developer_commits -- list of SHAs in chronological (newest-first)
                          order that the engine replays.
         conflicts       -- populated if RefreshConflict is raised.
+        config          -- the SacConfig used to regenerate the scaffold
+                         (None in dry-run if no .servicectl.json was found,
+                         though RefreshConfigMissing will fire first in
+                         a real refresh attempt).
         succeeded      -- True iff all developer commits replayed cleanly
                          and doctor/tests passed.
     """
@@ -112,6 +133,7 @@ class RefreshRun:
     conflicts: list[str] = field(default_factory=list)
     succeeded: bool = False
     developer_commits: list[str] = field(default_factory=list)
+    config: SacConfig | None = None
 
 
 def new_run_id() -> str:
@@ -239,23 +261,29 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
 
     Steps:
         1. Identify the developer commit list (chronological, newest-first).
-        2. Create a worktree on a fresh branch off source_repo's current HEAD.
-        3. (placeholder) Re-scaffold the worktree from the latest spec.
-           This is the missing piece in this commit; full implementation
-           lands once #48 (servicectl refresh CLI) is wired up.
-        4. Cherry-pick each developer commit in chronological order.
+        2. Read `.servicectl.json` to recover the scaffold inputs (template,
+           deploy target, registry, etc.). RefreshConfigMissing if absent.
+        3. Create a worktree on a fresh branch off source_repo's current HEAD.
+        4. Wipe the worktree contents (except .git/) and regenerate the
+           scaffold using ServiceGenerator.run(in_place=True) against the
+           current simple_and_clean release. This is the bit that picks
+           up new templates, deploy overlays, hooks, etc.
+        5. Cherry-pick each developer commit in chronological order.
            On conflict: abort the refresh, leave recovery ref intact,
            raise with conflicting_files + recovery_ref.
-        5. On success, mark succeeded=True. The CLI is responsible for
+        6. On success, mark succeeded=True. The CLI is responsible for
            deciding whether to fast-forward source_repo or just report
            the branch as ready to merge.
 
     If dry_run=True, build the RefreshRun with the developer-commits
     list and a synthesized scaffold_sha (HEAD of source_repo's current
-    branch) but don't actually create a worktree or cherry-pick.
+    branch) but don't actually create a worktree or cherry-pick. The
+    config is still read so the dry-run report can show what would be
+    regenerated.
 
     Raises:
         RefreshNotScaffoldedError if the repo has no SAC-managed commits.
+        RefreshConfigMissing if .servicectl.json is missing.
         RefreshConflict on cherry-pick conflict.
     """
     history = classify_history(source_repo)
@@ -265,6 +293,17 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
             "was it scaffolded by servicectl?"
         )
     developer_commits = history["developer"]
+
+    # Read the SAC config (template/flags). RefreshConfigMissing if absent.
+    try:
+        config = read_config(source_repo)
+    except FileNotFoundError:
+        raise RefreshConfigMissing(
+            f"{source_repo / CONFIG_FILENAME} not found. "
+            "Refresh needs the SAC config to know which template/flags "
+            "produced this service. Re-scaffold via `servicectl init --from-config`, "
+            "or pass `--from-config <path>` to refresh."
+        )
 
     run_id = new_run_id()
     branch_name = f"sac/refresh/{run_id}"
@@ -278,6 +317,7 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
         recovery_ref=recovery_ref,
         base_branch=base_branch,
         developer_commits=developer_commits,
+        config=config,
     )
 
     if dry_run:
@@ -302,6 +342,19 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
     )
 
     try:
+        # Regenerate the scaffold inside the worktree. Wipe all
+        # existing files except .git/ (which carries the worktree's
+        # git metadata), then run ServiceGenerator.run(in_place=True)
+        # so the fresh template tree lands at run.worktree_dir.
+        _regenerate_scaffold(run.worktree_dir, config)
+
+        # Read the new scaffold commit's SHA for the run state.
+        new_head = subprocess.run(
+            ["git", "-C", str(run.worktree_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        run.scaffold_sha = new_head
+
         for sha in developer_commits:
             try:
                 cherry_pick(run.worktree_dir, sha, recovery_ref=recovery_ref)
@@ -317,3 +370,43 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
         pass
 
     return run
+
+
+def _regenerate_scaffold(worktree_dir: Path, config: SacConfig) -> None:
+    """Wipe worktree_dir contents (except .git/) and re-scaffold it.
+
+    Import-local to avoid a circular import: generator.py imports from
+    sac_trailers (which is fine) but the reverse isn't safe in some
+    test setups that patch the package. Keeping this here means the
+    import is lazy and only triggers when refresh() actually runs.
+
+    ServiceGenerator with --in-place writes the scaffold tree directly
+    into output_dir (no <name> subfolder). We pass the worktree itself
+    as output_dir so the regenerated files land inside the worktree,
+    not its parent.
+    """
+    # Import lazily so generator -> sac_trailers -> replay -> generator
+    # doesn't form a cycle at module-load time.
+    from .generator import ServiceGenerator
+
+    # Wipe everything except .git/. shutil.rmtree would nuke git too.
+    for entry in list(worktree_dir.iterdir()):
+        if entry.name == ".git":
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+
+    # Pull the service name from the worktree basename; the regenerated
+    # scaffold needs to know "billing-api" not "sac-refresh-abc12345".
+    # We do this by passing a fresh output_dir (parent of the worktree)
+    # and using --in-place, so the result lands at worktree_dir itself.
+    ServiceGenerator(
+        name=worktree_dir.name,
+        output_dir=worktree_dir,
+        in_place=True,
+        with_git=True,
+        with_readme=True,
+        **config.to_generator_kwargs(),
+    ).run()

@@ -12,6 +12,8 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from .templates import get_template_description, list_templates, template_path
 from .sac_trailers import SacTrailers, commit_message_with_trailers
+from .sac_config import SacConfig, write_config
+from . import __version__
 
 # Files we never want to copy through (even if a template includes them).
 _IGNORED_NAMES = {".DS_Store", "Thumbs.db", "__init__.py", "__pycache__"}
@@ -106,8 +108,13 @@ class ServiceGenerator:
         target = self._resolve_target()
         if target.exists() and not self.in_place:
             raise ScaffoldError(f"target directory already exists: {target}")
-        if self.in_place and target.exists() and any(target.iterdir()):
+        if self.in_place and target.exists() and any(
+            entry.name != ".git" for entry in target.iterdir()
+        ):
             # In-place into a non-empty directory: refuse to avoid clobbering user code.
+            # `.git/` is allowed because servicectl refresh wipes everything except
+            # .git/ before calling run(in_place=True); git itself isn't user code we
+            # want to clobber.
             raise ScaffoldError(
                 f"--in-place target directory is not empty: {target}. "
                 "Pick an empty directory or remove this flag."
@@ -279,6 +286,30 @@ class ServiceGenerator:
             console.print(f"  copied   [bold]{copied_count}[/bold] static files")
 
         if self.with_git:
+            # Drop `.servicectl.json` BEFORE the initial commit so it's
+            # part of the scaffolded tree. This file lets
+            # `servicectl refresh` re-run the same scaffold against the
+            # current `simple_and_clean` release without the user having
+            # to re-pass the flags.
+            try:
+                config = SacConfig.from_generator(
+                    template=self.template,
+                    ci_provider=self.ci_provider,
+                    deploy_target=self.deploy_target,
+                    azure_region=self.azure_region,
+                    gcp_region=self.gcp_region,
+                    gcp_project_id=self.gcp_project_id,
+                    coverage_threshold=self.coverage_threshold,
+                    registry=self.registry,
+                    db=self.db,
+                    sac_version=__version__,
+                )
+                write_config(target, config)
+            except OSError as e:
+                raise ScaffoldError(
+                    f"failed to write {SacConfig.__name__}: {e}"
+                )
+
             try:
                 subprocess.run(
                     ["git", "init", "-q", "-b", "main", str(target)],

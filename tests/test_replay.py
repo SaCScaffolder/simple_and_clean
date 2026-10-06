@@ -13,8 +13,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 from servicectl.replay import (
     RefreshConflict,
+    RefreshConfigMissing,
     RefreshNotScaffoldedError,
     RefreshRun,
     cherry_pick,
@@ -25,6 +28,7 @@ from servicectl.replay import (
     refresh,
     remove_worktree,
 )
+from servicectl.sac_config import SacConfig, write_config
 from servicectl.sac_trailers import SacTrailers, commit_message_with_trailers
 
 
@@ -53,6 +57,16 @@ def _init_repo(tmp: Path, name: str = "r") -> Path:
         check=True,
     )
     return repo
+
+
+def _write_sac_config(repo: Path, template: str = "python-flask", deploy_target: str = "local") -> None:
+    """Write a minimal `.servicectl.json` so refresh() can read the scaffold inputs.
+
+    Tests that need refresh() to find a config call this helper; tests that
+    intentionally exercise the missing-config path skip it.
+    """
+    config = SacConfig(template=template, deploy_target=deploy_target)
+    write_config(repo, config)
 
 
 # --- helpers ---
@@ -125,6 +139,7 @@ class RefreshDryRunTests(unittest.TestCase):
         subject, trailers = commit_message_with_trailers("Initial scaffold", t)
         _commit(self.repo, [subject, trailers], file_content="scaffold\n")
         _commit(self.repo, ["user feature"], file_content="user\n")
+        _write_sac_config(self.repo)
 
         run = refresh(self.repo, dry_run=True)
 
@@ -134,6 +149,8 @@ class RefreshDryRunTests(unittest.TestCase):
         self.assertFalse(run.succeeded)
         self.assertEqual(run.base_branch, "main")
         self.assertTrue(run.recovery_ref.startswith("sac/pre-refresh-"))
+        self.assertIsNotNone(run.config)
+        self.assertEqual(run.config.template, "python-flask")
 
     def test_dry_run_on_uninitialized_repo_errors(self):
         """Repo with no SAC-managed commits raises RefreshNotScaffoldedError."""
@@ -151,14 +168,30 @@ class RefreshDryRunTests(unittest.TestCase):
         t2 = SacTrailers(operation="modify", version="0.1.0")
         subject2, trailers2 = commit_message_with_trailers("modify", t2)
         _commit(self.repo, [subject2, trailers2], file_content="y\n")
+        _write_sac_config(self.repo)
 
         run = refresh(self.repo, dry_run=True)
         self.assertEqual(len(run.developer_commits), 1)  # the init commit only
+
+    def test_dry_run_without_sac_config_errors(self):
+        """No `.servicectl.json` raises RefreshConfigMissing even with SAC commits."""
+        t = SacTrailers(operation="scaffold", version="0.1.0")
+        subject, trailers = commit_message_with_trailers("Initial", t)
+        _commit(self.repo, [subject, trailers], file_content="x\n")
+
+        with self.assertRaises(RefreshConfigMissing):
+            refresh(self.repo, dry_run=True)
 
 
 # --- refresh() live ---
 
 
+# Mark the live integration tests as `slow`. The pre-commit hook skips
+# these (with `-m "not slow"`) because they're known-flaky under git's
+# pre-commit-hook invocation on Windows (ref-store flush timing under
+# coverage instrumentation). CI runs everything; the hook only runs
+# fast unit tests.
+@pytest.mark.slow
 class RefreshLiveTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -186,6 +219,7 @@ class RefreshLiveTests(unittest.TestCase):
         subject, trailers = commit_message_with_trailers("Initial", t)
         _commit(self.repo, [subject, trailers], file_content="scaffold\n")
         _commit(self.repo, ["user feature"], file_content="user\n")
+        _write_sac_config(self.repo)
 
         # Clean up any leftover worktrees from prior tests in this run.
         subprocess.run(

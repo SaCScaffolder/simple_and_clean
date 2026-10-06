@@ -10,6 +10,12 @@
 # Coverage threshold is read from pyproject.toml (--cov-fail-under). If the
 # local checkout fails to meet the threshold, this hook fails the commit.
 #
+# We skip tests marked `slow` (integration tests that touch git subprocess).
+# These are known-flaky under git's pre-commit-hook invocation on Windows
+# (ref-store flush timing under coverage instrumentation) but pass cleanly
+# under CI's plain pytest invocation. CI still runs them; the hook doesn't.
+# See the changelog entry on the #48 commit for the rationale.
+#
 # To install (one-time per clone):
 #   git config core.hooksPath .githooks
 #
@@ -34,6 +40,6 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-echo "==> running tests + coverage gate (pre-commit hook, python=$PYTHON) ..."
-$PYTHON -m pytest -q
+echo "==> running tests + coverage gate (pre-commit hook, python=$PYTHON, -m 'not slow') ..."
+$PYTHON -m pytest -q -m "not slow"
 echo "==> tests passed and coverage threshold met."
