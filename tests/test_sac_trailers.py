@@ -194,5 +194,121 @@ class ClassifyHistoryTests(unittest.TestCase):
         self.assertEqual(result["sac"][1], sha_1)
 
 
+class ClassifyHistoryLegacyTests(unittest.TestCase):
+    """Tests for classify_history(repo, sac_base_commit=...).
+
+    Legacy migration: repos scaffolded before SAC trailers shipped
+    have no SAC-Managed trailer in their history. Setting
+    `sac_base_commit` to the SHA of the original scaffold commit (or
+    any ancestor thereof) tells `classify_history` to treat everything
+    at or older than that SHA as SAC-managed. Newer commits fall
+    through to normal trailer-based classification.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = _init_repo(Path(self._tmp.name))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _history(self):
+        """Return all commit SHAs newest-first, so we can name anchors."""
+        log_out = subprocess.run(
+            ["git", "-C", str(self.repo), "log", "--format=%H"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        return log_out.strip().split("\n")
+
+    def test_anchor_treats_older_commits_as_sac(self):
+        """With sac_base_commit set to the initial commit, that commit
+        classifies as SAC even without trailers. Newer developer commits
+        stay developer."""
+        # Add a developer commit on top of the initial commit.
+        _commit(self.repo, ["user feature"], file_content="user work\n")
+        all_shas = self._history()
+        # all_shas: [developer, initial] (newest first)
+        # Use the initial commit (oldest) as the SAC anchor.
+        initial_sha = all_shas[-1]
+
+        result = classify_history(self.repo, sac_base_commit=initial_sha)
+
+        # The initial commit is SAC via the anchor.
+        # The developer commit is developer (newer than the anchor).
+        self.assertIn(initial_sha, result["sac"])
+        self.assertNotIn(initial_sha, result["developer"])
+        self.assertEqual(len(result["developer"]), 1)
+        self.assertEqual(len(result["sac"]), 1)
+
+    def test_anchor_includes_ancestors(self):
+        """All ancestors of the anchor (including the anchor itself)
+        are SAC. Anything strictly newer is developer."""
+        # Build a 3-commit history: initial, SAC-tagged, user.
+        t = SacTrailers(operation="scaffold", version="0.1.0")
+        s, tt = commit_message_with_trailers("Initial scaffold", t)
+        sac_sha = _commit(self.repo, [s, tt], file_content="scaffold\n")
+        user_sha = _commit(self.repo, ["user feature"], file_content="user\n")
+
+        # Anchor on the SAC-tagged commit (so its predecessor the
+        # initial commit is also SAC, but the user commit is not).
+        result = classify_history(self.repo, sac_base_commit=sac_sha)
+
+        self.assertIn(sac_sha, result["sac"])
+        self.assertIn(user_sha, result["developer"])
+        self.assertNotIn(user_sha, result["sac"])
+        # 2 SAC (initial + sac_sha), 1 developer (user_sha).
+        self.assertEqual(len(result["sac"]), 2)
+        self.assertEqual(len(result["developer"]), 1)
+
+    def test_anchor_with_short_sha(self):
+        """git short SHAs work — we resolve via rev-parse first."""
+        all_shas = self._history()
+        initial_sha = all_shas[-1]
+        # Truncate to a short SHA (7 chars is git's default short).
+        short_sha = initial_sha[:7]
+
+        result = classify_history(self.repo, sac_base_commit=short_sha)
+        self.assertIn(initial_sha, result["sac"])
+
+    def test_anchor_with_branch_name(self):
+        """Branch names resolve via rev-parse too."""
+        # The initial commit is on main by default in _init_repo.
+        result = classify_history(self.repo, sac_base_commit="main")
+        # main's tip is the most recent commit (a user commit we added
+        # above). It's strictly newer than initial, so it should be
+        # developer. The initial commit itself is an ancestor of main
+        # and should be SAC.
+        all_shas = self._history()
+        initial_sha = all_shas[-1]
+        self.assertIn(initial_sha, result["sac"])
+
+    def test_invalid_anchor_raises_valueerror(self):
+        """A SHA that doesn't exist raises ValueError with a clear message."""
+        with self.assertRaises(ValueError) as cm:
+            classify_history(self.repo, sac_base_commit="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        self.assertIn("does not resolve", str(cm.exception))
+
+    def test_anchor_unset_falls_through_to_trailer(self):
+        """Without sac_base_commit, only SAC trailers mark commits.
+        This is the legacy behavior; the anchor is purely additive."""
+        t = SacTrailers(operation="scaffold", version="0.1.0")
+        s, tt = commit_message_with_trailers("Initial scaffold", t)
+        sac_sha = _commit(self.repo, [s, tt], file_content="scaffold\n")
+        _commit(self.repo, ["user feature"], file_content="user\n")
+        _commit(self.repo, ["another user feature"], file_content="user2\n")
+
+        result = classify_history(self.repo)
+        self.assertEqual(len(result["sac"]), 1)
+        self.assertEqual(len(result["developer"]), 3)
+        self.assertEqual(result["sac"][0], sac_sha)
+
+    def test_anchor_on_unrelated_sha_raises(self):
+        """A SHA from a different repo raises. We resolve via the local
+        repo's rev-parse; a foreign SHA would fail."""
+        # All-zero SHA is valid format but doesn't exist anywhere.
+        with self.assertRaises(ValueError):
+            classify_history(self.repo, sac_base_commit="0000000000000000000000000000000000000000")
+
+
 if __name__ == "__main__":
     unittest.main()

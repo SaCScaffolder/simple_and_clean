@@ -147,7 +147,26 @@ def is_sac_managed(repo: Path, sha: str) -> bool:
     return read_trailer(repo, sha, "SAC-Managed").lower() == "true"
 
 
-def classify_history(repo: str) -> dict[str, list[str]]:
+def _ancestors_of(repo: Path, sha: str) -> set[str]:
+    """Return the set of SHAs reachable from `sha` (i.e., `sha` and its ancestors).
+
+    Uses `git rev-list` (not log) so we get the full reachability set.
+    Empty set on empty stdout (which shouldn't happen for a valid SHA
+    in a valid repo).
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-list", sha],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return {line for line in result.stdout.splitlines() if line.strip()}
+
+
+def classify_history(
+    repo: str,
+    sac_base_commit: str | None = None,
+) -> dict[str, list[str]]:
     """Walk git history newest-first and bucket commits by SAC vs developer.
 
     Returns:
@@ -161,9 +180,42 @@ def classify_history(repo: str) -> dict[str, list[str]]:
     in one shell-out. --first-parent is intentionally NOT used: we
     want every commit, including those reachable only via merge.
 
+    Legacy-migration mode:
+        If `sac_base_commit` is set (a SHA), commits reachable from
+        that SHA (i.e., the SHA itself and its ancestors) are treated
+        as SAC-managed regardless of whether they carry the trailer.
+        Anything newer than `sac_base_commit` falls through to the
+        normal trailer-based classification. Use this for repos that
+        were scaffolded before SAC trailers shipped and haven't been
+        retroactively tagged.
+
     Pre-condition: repo is a git working directory. Raises
     subprocess.CalledProcessError if it isn't.
+
+    Raises:
+        ValueError if sac_base_commit is set but the SHA can't be
+        resolved in `repo` (likely a typo or an unrelated repo).
     """
+    repo_path = Path(repo)
+
+    # Resolve the legacy anchor up front so a bad SHA fails fast with a
+    # clear message rather than half-classifying everything.
+    sac_ancestors: set[str] = set()
+    if sac_base_commit:
+        # Resolve the SHA first so we get a clean error on a typo.
+        resolved = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--verify", sac_base_commit + "^{commit}"],
+            capture_output=True,
+            text=True,
+        )
+        if resolved.returncode != 0:
+            raise ValueError(
+                f"SAC_BASE_COMMIT={sac_base_commit!r} does not resolve in {repo}: "
+                f"{resolved.stderr.strip() or resolved.stdout.strip()}"
+            )
+        resolved_sha = resolved.stdout.strip()
+        sac_ancestors = _ancestors_of(repo_path, resolved_sha)
+
     result = subprocess.run(
         ["git", "-C", repo, "log", "--format=%H"],
         capture_output=True,
@@ -175,7 +227,12 @@ def classify_history(repo: str) -> dict[str, list[str]]:
         sha = line.strip()
         if not sha:
             continue
-        bucket = "sac" if is_sac_managed(Path(repo), sha) else "developer"
+        if sha in sac_ancestors:
+            bucket = "sac"
+        elif is_sac_managed(repo_path, sha):
+            bucket = "sac"
+        else:
+            bucket = "developer"
         out[bucket].append(sha)
     return out
 

@@ -52,6 +52,13 @@ class SacConfig:
     so we don't store it here. The CLI is responsible for resolving the
     name from `--repo`.
 
+    `sac_base_commit` is the legacy-migration anchor: when set, commits
+    reachable from this SHA (i.e. at or older than it) are treated as
+    SAC-managed by `classify_history()`, regardless of trailers. Use
+    this for repos that were scaffolded before SAC trailers shipped;
+    once a repo has been re-tagged or its commits naturally carry the
+    trailer, you can drop the field.
+
     `from_dict()` / `to_dict()` are the JSON boundary; everything else
     in this module works with the dataclass.
     """
@@ -67,6 +74,7 @@ class SacConfig:
     registry: str = "ghcr"
     db: str = "postgres"
     sac_version: str = ""
+    sac_base_commit: str | None = None  # legacy-migration anchor (optional)
 
     @classmethod
     def from_generator(
@@ -108,9 +116,14 @@ class SacConfig:
     def to_generator_kwargs(self) -> dict[str, object]:
         """Return the kwargs needed to construct a ServiceGenerator for refresh.
 
-        Excludes bookkeeping (schema_version, sac_version) and includes
-        everything else, so a refresh against an older scaffold can pick
-        up exactly the same flags the user originally passed.
+        Excludes bookkeeping (schema_version, sac_version, sac_base_commit)
+        and includes everything else, so a refresh against an older
+        scaffold can pick up exactly the same flags the user originally
+        passed.
+
+        `sac_base_commit` is excluded because it's metadata for the
+        legacy-migration path, not a scaffolder input. The ServiceGenerator
+        would reject it as an unknown kwarg.
 
         Note: `name` and `output_dir` are not part of the config; the
         refresh CLI computes those from the `--repo` argument.
@@ -118,6 +131,7 @@ class SacConfig:
         d = self.to_dict()
         d.pop("schema_version", None)
         d.pop("sac_version", None)
+        d.pop("sac_base_commit", None)
         return d
 
     @classmethod
@@ -160,10 +174,32 @@ def read_config(service_dir: Path) -> SacConfig:
     return SacConfig.from_dict(data)
 
 
+def resolve_sac_base_commit(config: SacConfig) -> str | None:
+    """Return the legacy-migration SAC base commit SHA, if any.
+
+    Precedence: the `SAC_BASE_COMMIT` env var wins over the config-file
+    field. Returns None if neither is set. Whitespace is stripped.
+
+    Why the env-var override exists: a one-off `SAC_BASE_COMMIT=<sha>
+    servicectl refresh` should not require editing `.servicectl.json`.
+    Persisted migrations can land in the config file; ad-hoc ones can
+    use the env var.
+    """
+    import os
+
+    env_val = os.environ.get("SAC_BASE_COMMIT", "").strip()
+    if env_val:
+        return env_val
+    if config.sac_base_commit:
+        return config.sac_base_commit.strip() or None
+    return None
+
+
 __all__ = [
     "SacConfig",
     "write_config",
     "read_config",
+    "resolve_sac_base_commit",
     "CONFIG_FILENAME",
     "SCHEMA_VERSION",
 ]

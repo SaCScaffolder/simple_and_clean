@@ -31,6 +31,7 @@ from .modifier import ModifierError, ServiceModifier
 from .replay import (
     RefreshConflict,
     RefreshConfigMissing,
+    RefreshError,
     RefreshNotScaffoldedError,
 )
 from .sac_config import SacConfig, write_config

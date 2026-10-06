@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .sac_trailers import classify_history, is_sac_managed
-from .sac_config import SacConfig, read_config, CONFIG_FILENAME
+from .sac_config import SacConfig, read_config, resolve_sac_base_commit, CONFIG_FILENAME
 
 
 # ----- errors -----
@@ -286,7 +286,27 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
         RefreshConfigMissing if .servicectl.json is missing.
         RefreshConflict on cherry-pick conflict.
     """
-    history = classify_history(source_repo)
+    # First, peek at the SAC config for the legacy anchor. We don't fail
+    # if it's missing -- the legacy anchor is optional. We do need the
+    # SAC_BASE_COMMIT field (or env var) before we can classify correctly.
+    sac_base_commit: str | None = None
+    config: SacConfig | None = None
+    try:
+        config = read_config(source_repo)
+        sac_base_commit = resolve_sac_base_commit(config)
+    except FileNotFoundError:
+        # No .servicectl.json. We can still try classification with no
+        # legacy anchor; if the repo carries SAC trailers natively,
+        # we proceed (and the missing-config error fires below). If it
+        # doesn't, we report RefreshNotScaffoldedError first.
+        pass
+
+    # Classify history. Errors from a bad SAC_BASE_COMMIT SHA surface
+    # as RefreshError so the CLI can convert them to a clean message.
+    try:
+        history = classify_history(source_repo, sac_base_commit=sac_base_commit)
+    except ValueError as e:
+        raise RefreshError(str(e)) from e
     if not history["sac"]:
         raise RefreshNotScaffoldedError(
             f"{source_repo} has no SAC-managed commits; "
@@ -294,10 +314,10 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
         )
     developer_commits = history["developer"]
 
-    # Read the SAC config (template/flags). RefreshConfigMissing if absent.
-    try:
-        config = read_config(source_repo)
-    except FileNotFoundError:
+    # Now confirm the config is present. We don't bail above because a
+    # repo with SAC trailers but no .servicectl.json should still
+    # report "not scaffolded" before "missing config."
+    if config is None:
         raise RefreshConfigMissing(
             f"{source_repo / CONFIG_FILENAME} not found. "
             "Refresh needs the SAC config to know which template/flags "

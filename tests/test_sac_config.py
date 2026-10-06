@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from servicectl.sac_config import (  # noqa: E402
     CONFIG_FILENAME,
     SacConfig,
     read_config,
+    resolve_sac_base_commit,
     write_config,
 )
 
@@ -140,6 +142,64 @@ class SacConfigFileIoTests(unittest.TestCase):
         c = SacConfig()
         p = write_config(self.dir, c)
         self.assertEqual(p, self.dir / CONFIG_FILENAME)
+
+
+class ResolveSacBaseCommitTests(unittest.TestCase):
+    """Tests for resolve_sac_base_commit() — env var vs config field precedence."""
+
+    def setUp(self):
+        # Clean any inherited SAC_BASE_COMMIT so the tests are deterministic.
+        self._saved = os.environ.pop("SAC_BASE_COMMIT", None)
+
+    def tearDown(self):
+        if self._saved is not None:
+            os.environ["SAC_BASE_COMMIT"] = self._saved
+        else:
+            os.environ.pop("SAC_BASE_COMMIT", None)
+
+    def test_returns_none_when_unset(self):
+        """No env var, no config field -> None."""
+        c = SacConfig()
+        self.assertIsNone(resolve_sac_base_commit(c))
+
+    def test_config_field_returns_when_set(self):
+        """Config file field is the fallback when env var is absent."""
+        c = SacConfig(sac_base_commit="abc1234")
+        self.assertEqual(resolve_sac_base_commit(c), "abc1234")
+
+    def test_env_var_overrides_config(self):
+        """Env var wins. Useful for one-off refresh without editing config."""
+        c = SacConfig(sac_base_commit="abc1234")
+        os.environ["SAC_BASE_COMMIT"] = "deadbeef"
+        self.assertEqual(resolve_sac_base_commit(c), "deadbeef")
+
+    def test_env_var_only_no_config_field(self):
+        """Env var works even if config has no sac_base_commit."""
+        c = SacConfig()  # no field
+        os.environ["SAC_BASE_COMMIT"] = "feedface"
+        self.assertEqual(resolve_sac_base_commit(c), "feedface")
+
+    def test_whitespace_stripped_from_env(self):
+        """Trailing newline from `export SAC_BASE_COMMIT=...\\n` is fine."""
+        c = SacConfig()
+        os.environ["SAC_BASE_COMMIT"] = "  feedface  \n"
+        self.assertEqual(resolve_sac_base_commit(c), "feedface")
+
+    def test_whitespace_stripped_from_config(self):
+        """The config field gets stripped too (defensive against JSON typos)."""
+        c = SacConfig(sac_base_commit="  feedface  ")
+        self.assertEqual(resolve_sac_base_commit(c), "feedface")
+
+    def test_empty_string_treated_as_unset(self):
+        """Empty env var value => None (don't return empty string to git)."""
+        c = SacConfig()
+        os.environ["SAC_BASE_COMMIT"] = ""
+        self.assertIsNone(resolve_sac_base_commit(c))
+
+    def test_empty_config_field_treated_as_unset(self):
+        """Empty config field => None."""
+        c = SacConfig(sac_base_commit="")
+        self.assertIsNone(resolve_sac_base_commit(c))
 
 
 if __name__ == "__main__":
