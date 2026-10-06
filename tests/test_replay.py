@@ -148,7 +148,7 @@ class RefreshDryRunTests(unittest.TestCase):
         self.assertNotEqual(run.scaffold_sha, "")  # set to HEAD's SHA in dry-run
         self.assertFalse(run.succeeded)
         self.assertEqual(run.base_branch, "main")
-        self.assertTrue(run.recovery_ref.startswith("sac/pre-refresh-"))
+        self.assertTrue(run.recovery_ref.startswith("refs/sac/pre-refresh-"))
         self.assertIsNotNone(run.config)
         self.assertEqual(run.config.template, "python-flask")
 

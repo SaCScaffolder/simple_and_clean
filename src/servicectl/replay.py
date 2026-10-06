@@ -307,7 +307,7 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
 
     run_id = new_run_id()
     branch_name = f"sac/refresh/{run_id}"
-    recovery_ref = f"sac/pre-refresh-{run_id}"
+    recovery_ref = f"refs/sac/pre-refresh-{run_id}"
     base_branch = current_branch(source_repo)
 
     run = RefreshRun(

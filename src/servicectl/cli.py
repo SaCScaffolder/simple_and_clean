@@ -585,7 +585,7 @@ def refresh(repo: Path, dry_run: bool, yes: bool) -> None:
     latest template set, and replays the developer commits on top.
 
     The original branch is untouched until success; on conflict the
-    recovery ref `sac/pre-refresh-<id>` points at the pre-refresh HEAD
+    recovery ref `refs/sac/pre-refresh-<id>` points at the pre-refresh HEAD
     so you can roll back with `git update-ref`.
 
     Requires a `.servicectl.json` in the service root (written by
