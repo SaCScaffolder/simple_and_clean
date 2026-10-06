@@ -151,8 +151,28 @@ class ServiceGenerator:
             "db_docker_image": db_meta["docker_image"],
             "db_env_prefix": db_meta["env_prefix"],
             "db_healthcheck_cmd": db_meta["healthcheck_cmd"],
-            "image_name": f"{self.registry}/{self.name}",
+            "image_name": f"{self._registry_hostname()}/{self.name}",
+            "registry_hostname": self._registry_hostname(),
         }
+
+    def _registry_hostname(self) -> str:
+        """Return the canonical registry hostname for self.registry.
+
+        Users type the registry's short alias (e.g. "ghcr", "docker.io")
+        in --registry, but Docker image refs and the docker/login-action's
+        `registry:` field need the full hostname ("ghcr.io", not "ghcr").
+        This maps the common short forms to their full hostnames; anything
+        not in the table is passed through unchanged so private registries
+        with explicit hostnames keep working.
+        """
+        aliases = {
+            "ghcr": "ghcr.io",
+            "dockerhub": "docker.io",
+            "docker": "docker.io",
+            "acr": "",  # ACR requires a fully-qualified .azurecr.io; pass-through.
+            "gcr": "gcr.io",
+        }
+        return aliases.get(self.registry.lower(), self.registry)
 
     def _render_file(self, rel: Path, src: Path, dest: Path, env: Environment, ctx: dict[str, object]) -> None:
         # Files ending in `.j2` are rendered and the suffix is stripped.
