@@ -7,6 +7,9 @@ All notable changes to `servicectl` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **SAC-Managed trailer system (#45 partial).** New module `src/servicectl/sac_trailers.py` establishes the v1 git-trailer schema for SAC commits: `SAC-Managed`, `SAC-Operation`, `SAC-Spec-Version`, `SAC-Version`. The initial scaffold commit now carries these trailers, so a future `servicectl refresh` (#48) can distinguish SAC-managed commits from user/developer commits when replaying history onto a fresh scaffold. Helpers: `SacTrailers`, `commit_message_with_trailers`, `read_trailer(s)`, `is_sac_managed`, `classify_history`. 13 new tests cover render, round-trip, unrelated-trailer-ignored, defensive classification, and a regression that locks the trailer presence on the generator's commit path.
+
+### Added
 - **Coverage threshold enforced locally.** `[tool.pytest.ini_options]` in pyproject.toml now sets `--cov=servicectl --cov-fail-under=80`, so any `pytest` invocation (including the in-source `tests/test_smoke.py` runner) fails when coverage drops below 80%. Before this change, the coverage threshold was documented but never enforced — a commit that dropped coverage would still pass tests locally and only fail in CI on push. The `.githooks/pre-commit` hook now runs `pytest -q` so local == CI behavior.
 - **9 new smoke tests** covering previously-untested code paths (combined with the existing tests, coverage is now 81.19%, clearing the 80% threshold):
   - `test_init_from_config_invalid_json_errors` (cli.py JSONDecodeError branch)
