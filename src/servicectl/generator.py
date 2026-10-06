@@ -11,6 +11,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from .templates import get_template_description, list_templates, template_path
+from .sac_trailers import SacTrailers, commit_message_with_trailers
 
 # Files we never want to copy through (even if a template includes them).
 _IGNORED_NAMES = {".DS_Store", "Thumbs.db", "__init__.py", "__pycache__"}
@@ -302,10 +303,18 @@ class ServiceGenerator:
                     check=True,
                     capture_output=True,
                 )
+                # SAC-Managed trailers: this commit was produced by
+                # servicectl's scaffold operation, so a future `servicectl
+                # refresh` can identify and replace it. See
+                # src/servicectl/sac_trailers.py for the schema.
+                trailers = SacTrailers(operation="scaffold", version="dev")
+                subject, trailer_block = commit_message_with_trailers(
+                    "Initial scaffold from servicectl", trailers
+                )
                 subprocess.run(
                     ["git", "-C", str(target), "-c", "user.email=servicectl@example.com",
                      "-c", "user.name=servicectl", "commit", "-q",
-                     "-m", "Initial scaffold from servicectl"],
+                     "-m", subject, "-m", trailer_block],
                     check=True,
                     capture_output=True,
                 )
