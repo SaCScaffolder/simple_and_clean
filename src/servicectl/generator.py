@@ -100,12 +100,21 @@ class ServiceGenerator:
         if self.db not in SUPPORTED_DBS:
             raise ScaffoldError(f"unsupported --db: {self.db!r} (allowed: {sorted(SUPPORTED_DBS)})")
         # --git-remote requires https:// (SSH not supported in v1).
-        if self.git_remote is not None and not self.git_remote.startswith("https://"):
+        # An empty string is also treated as "no remote" so callers can
+        # pass through `git_remote=""` without us rejecting it.
+        if self.git_remote and not self.git_remote.startswith("https://"):
             raise ScaffoldError(
                 f"--git-remote must start with https:// (got: {self.git_remote!r})"
             )
         # Make sure we don't overwrite an existing directory unless --in-place.
         target = self._resolve_target()
+        if target.exists() and not target.is_dir():
+            # The path exists but it's a file (or symlink to a file).
+            # Scaffolding requires a directory; refuse with a clear message.
+            raise ScaffoldError(
+                f"target path exists and is not a directory: {target}. "
+                "Remove the file or pick a different --output-dir / service name."
+            )
         if target.exists() and not self.in_place:
             raise ScaffoldError(f"target directory already exists: {target}")
         if self.in_place and target.exists() and any(
