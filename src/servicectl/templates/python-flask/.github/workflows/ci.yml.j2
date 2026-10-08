@@ -7,7 +7,12 @@ on:
     branches: [main]
 
 env:
-  IMAGE_NAME: {{ registry_hostname }}/${{ '{{' }} lower(github.repository_owner) {{ '}}' }}/{{ service_name }}
+  # IMAGE_NAME is set in the "Set image name" step at the top of
+  # each job that needs it (build, publish). We can't use a GitHub
+  # Actions expression function to lowercase github.repository_owner
+  # — there is no such function — so we compute it in shell and
+  # write to $GITHUB_ENV. This matters for mixed-case org names
+  # like SaCScaffolder; Docker requires lowercase repo names.
 
 jobs:
   test:
@@ -19,7 +24,7 @@ jobs:
         env:
           POSTGRES_DB: {{ service_name }}_test
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: ***
+          POSTGRES_PASSWORD: postgres
         ports:
           - 5432:5432
         options: >-
@@ -32,7 +37,7 @@ jobs:
       POSTGRES_PORT: 5432
       POSTGRES_DB: {{ service_name }}_test
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ***
+      POSTGRES_PASSWORD: postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -57,6 +62,10 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Set image name
+        run: |
+          {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
+          echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/{{ service_name }}" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: Build image
         run: {% raw %}docker build -t $IMAGE_NAME:${{ github.sha }} .{% endraw %}
@@ -77,6 +86,10 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Set image name
+        run: |
+          {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
+          echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/{{ service_name }}" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: docker/login-action@v3
         with:
