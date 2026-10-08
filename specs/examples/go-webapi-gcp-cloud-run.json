@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "service": {
+    "name": "billing-api",
+    "description": "Reads customer invoices from Postgres and exposes them over a small JSON API."
+  },
+  "template": "go-webapi",
+  "ci": {
+    "provider": "github-actions",
+    "coverage_threshold": 85
+  },
+  "deploy": {
+    "target": "gcp-cloud-run",
+    "gcp_region": "us-central1",
+    "gcp_project_id": "my-gcp-project"
+  },
+  "registry": "gar",
+  "database": "postgres",
+  "overlays": {
+    "auth": "oidc",
+    "observability": "opentelemetry",
+    "logs": "console"
+  }
+}

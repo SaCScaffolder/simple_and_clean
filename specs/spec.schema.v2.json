@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/SaCScaffolder/simple_and_clean/specs/spec.schema.v2.json",
+  "title": "Service Specification",
+  "description": "Declarative description of a service to be scaffolded by `servicectl init`. A v2 spec is a self-contained JSON object; the same shape is accepted by `--from-config` and (when committed at the repo root) by `servicectl refresh` as the source of truth.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "service", "template"],
+  "properties": {
+    "schema_version": {
+      "description": "Spec schema version. Must be 2 for this schema. Bump to a new top-level number when the shape changes incompatibly.",
+      "const": 2
+    },
+    "service": {
+      "description": "Identity and naming for the scaffolded service. Kept separate from runtime concerns so the same spec can be re-targeted at a different name (e.g. for staging clones).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "description": "Service name. Used for the output directory, the container image name, and (where applicable) the cloud resource name. Allowed: letters, digits, dash, underscore, dot.",
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "description": {
+          "description": "Free-text one-liner used in the generated README and the scaffolder's success panel.",
+          "type": "string",
+          "maxLength": 200
+        }
+      }
+    },
+    "template": {
+      "description": "Runtime template to render. Determines language, framework, and the test/precommit toolchain that gets installed.",
+      "type": "string",
+      "enum": [
+        "node-express",
+        "node-react-web",
+        "python-flask",
+        "dotnet-webapi",
+        "go-webapi"
+      ]
+    },
+    "ci": {
+      "description": "CI provider configuration. Renders the workflow file and sets the runner expectations in the generated pre-commit hooks.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["github-actions", "azure-devops"]
+        },
+        "coverage_threshold": {
+          "description": "Minimum test coverage (percent) required for a green CI run and a passing local pre-commit. The pre-commit hook parses the same coverage output the CI does and fails the commit at the same threshold.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 80
+        }
+      },
+      "default": { "provider": "github-actions", "coverage_threshold": 80 }
+    },
+    "deploy": {
+      "description": "Deployment target. The `local` target skips cloud manifest generation; everything else emits a deploy overlay under `deploy/<target>/`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target"],
+      "properties": {
+        "target": {
+          "type": "string",
+          "enum": [
+            "local",
+            "azure",
+            "gcp-cloud-run",
+            "gcp-gke-autopilot"
+          ]
+        },
+        "azure_region": {
+          "description": "Azure region for `deploy.target=azure`. Ignored otherwise.",
+          "type": "string",
+          "default": "eastus"
+        },
+        "gcp_region": {
+          "description": "GCP region for `deploy.target=gcp-*`. Ignored otherwise.",
+          "type": "string",
+          "default": "us-central1"
+        },
+        "gcp_project_id": {
+          "description": "GCP project ID for `deploy.target=gcp-*`. May be omitted at scaffold time; the rendered Terraform will refuse to apply until the placeholder is replaced.",
+          "type": ["string", "null"],
+          "default": null
+        }
+      }
+    },
+    "registry": {
+      "description": "Container registry. Short aliases (`ghcr`, `dockerhub`) are expanded to hostnames (`ghcr.io`, `docker.io`) inside the image name.",
+      "type": "string",
+      "enum": ["dockerhub", "ghcr", "ecr", "acr", "gcr", "gar"],
+      "default": "ghcr"
+    },
+    "database": {
+      "description": "Database backend. Each value maps to a specific cloud resource type and a local-dev Docker image. Pick the engine, not the cloud-specific flavor — `deploy.target` decides whether the Azure, GCP, or local Compose resource is emitted.",
+      "type": "string",
+      "enum": ["postgres", "mysql", "mssql", "cosmosdb"],
+      "default": "postgres"
+    },
+    "overlays": {
+      "description": "Composability layer. Each entry adds a feature on top of the bare template + deploy + db. Overlays are designed to be added, removed, and reordered without invalidating the rest of the spec. v1's flat flags (`--auth oauth`, `--otel`, `--elk`) are projected onto entries here; see the migration guide in `docs/spec-v2.md`.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auth": {
+          "description": "Authentication overlay. `none` emits no auth scaffolding; the others render middleware, env wiring, and a starter login route.",
+          "type": "string",
+          "enum": ["none", "api-key", "oauth", "oidc", "entra", "google", "certificate"],
+          "default": "none"
+        },
+        "observability": {
+          "description": "Telemetry overlay. `none` ships no telemetry; `opentelemetry` adds OTel SDK + exporter wiring; the logs/ backends are orthogonal and listed under `logs`.",
+          "type": "string",
+          "enum": ["none", "opentelemetry"],
+          "default": "none"
+        },
+        "logs": {
+          "description": "Log shipping target. The OTel overlay must be enabled for log exporters to light up; this entry just chooses the destination.",
+          "type": "string",
+          "enum": ["console", "elk", "kusto"],
+          "default": "console"
+        }
+      },
+      "default": { "auth": "none", "observability": "none", "logs": "console" }
+    }
+  }
+}
