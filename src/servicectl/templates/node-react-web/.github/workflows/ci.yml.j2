@@ -6,8 +6,12 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  IMAGE_NAME: {{ registry_hostname }}/${{ '{{' }} lower(github.repository_owner) {{ '}}' }}/{{ service_name }}
+# IMAGE_NAME is set in the "Set image name" step at the top of
+# each job that needs it (build, publish). We can't use a GitHub
+# Actions expression function to lowercase github.repository_owner
+# — there is no such function — so we compute it in shell and
+# write to $GITHUB_ENV. This matters for mixed-case org names
+# like SaCScaffolder; Docker requires lowercase repo names.
 
 jobs:
   test:
@@ -55,6 +59,10 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Set image name
+        run: |
+          {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
+          echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/{{ service_name }}" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
 
       - name: Build image
@@ -82,6 +90,10 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Set image name
+        run: |
+          {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
+          echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/{{ service_name }}" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
 
       - uses: docker/login-action@v3
