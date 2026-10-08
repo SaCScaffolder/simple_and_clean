@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "service": {
+    "name": "user-portal",
+    "description": "Internal user directory; Entra SSO + ELK logging."
+  },
+  "template": "python-flask",
+  "ci": {
+    "provider": "azure-devops",
+    "coverage_threshold": 80
+  },
+  "deploy": {
+    "target": "azure",
+    "azure_region": "centralus"
+  },
+  "registry": "acr",
+  "database": "mssql",
+  "overlays": {
+    "auth": "entra",
+    "observability": "opentelemetry",
+    "logs": "elk"
+  }
+}

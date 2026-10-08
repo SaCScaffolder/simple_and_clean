@@ -26,6 +26,7 @@ classifiers = [
 dependencies = [
     "click>=8.1",
     "jinja2>=3.1",
+    "jsonschema>=4.0",  # for `servicectl validate` (issue #50) and ad-hoc spec checks
     "pyyaml>=6.0",
     "rich>=13.0",
 ]
