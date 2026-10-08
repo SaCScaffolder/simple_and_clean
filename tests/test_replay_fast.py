@@ -50,7 +50,7 @@ class RegenerateScaffoldTests(unittest.TestCase):
 
         with mock.patch("servicectl.generator.ServiceGenerator") as MockGen:
             MockGen.return_value.run.return_value = self.wt
-            _regenerate_scaffold(self.wt, config)
+            _regenerate_scaffold(self.wt, "billing-api", config)
 
         remaining = {p.name for p in self.wt.iterdir()}
         self.assertIn(".git", remaining)
@@ -63,7 +63,7 @@ class RegenerateScaffoldTests(unittest.TestCase):
 
         with mock.patch("servicectl.generator.ServiceGenerator") as MockGen:
             MockGen.return_value.run.return_value = self.wt
-            _regenerate_scaffold(self.wt, config)
+            _regenerate_scaffold(self.wt, "billing-api", config)
 
         # The ServiceGenerator was called once with these kwargs.
         MockGen.assert_called_once()
@@ -72,7 +72,11 @@ class RegenerateScaffoldTests(unittest.TestCase):
         self.assertTrue(call_kwargs["with_git"])
         self.assertTrue(call_kwargs["with_readme"])
         self.assertEqual(call_kwargs["output_dir"], self.wt)
-        self.assertEqual(call_kwargs["name"], self.wt.name)
+        # The service name comes from the source repo, not the worktree's
+        # basename (otherwise the regenerated scaffold would be named
+        # `sac-refresh-<id>` and developer commits referencing the
+        # original package path would fail to cherry-pick).
+        self.assertEqual(call_kwargs["name"], "billing-api")
         # Generator kwargs from config were forwarded.
         self.assertEqual(call_kwargs["template"], "python-flask")
 
@@ -88,7 +92,7 @@ class RegenerateScaffoldTests(unittest.TestCase):
 
         with mock.patch("servicectl.generator.ServiceGenerator") as MockGen:
             MockGen.return_value.run.return_value = self.wt
-            _regenerate_scaffold(self.wt, config)
+            _regenerate_scaffold(self.wt, "billing-api", config)
 
         kw = MockGen.call_args.kwargs
         self.assertEqual(kw["template"], "go-webapi")

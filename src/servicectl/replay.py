@@ -366,7 +366,12 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
         # existing files except .git/ (which carries the worktree's
         # git metadata), then run ServiceGenerator.run(in_place=True)
         # so the fresh template tree lands at run.worktree_dir.
-        _regenerate_scaffold(run.worktree_dir, config)
+        # `source_repo.resolve().name` is the original repo's basename
+        # (e.g. "billing-api"), which is what the regenerated scaffold's
+        # package path should be. resolve() is needed because the CLI
+        # accepts "." and Path(".").name == "" (empty). See
+        # _regenerate_scaffold for why.
+        _regenerate_scaffold(run.worktree_dir, source_repo.resolve().name, config)
 
         # Read the new scaffold commit's SHA for the run state.
         new_head = subprocess.run(
@@ -392,7 +397,7 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
     return run
 
 
-def _regenerate_scaffold(worktree_dir: Path, config: SacConfig) -> None:
+def _regenerate_scaffold(worktree_dir: Path, source_name: str, config: SacConfig) -> None:
     """Wipe worktree_dir contents (except .git/) and re-scaffold it.
 
     Import-local to avoid a circular import: generator.py imports from
@@ -418,12 +423,16 @@ def _regenerate_scaffold(worktree_dir: Path, config: SacConfig) -> None:
         else:
             entry.unlink()
 
-    # Pull the service name from the worktree basename; the regenerated
-    # scaffold needs to know "billing-api" not "sac-refresh-abc12345".
-    # We do this by passing a fresh output_dir (parent of the worktree)
-    # and using --in-place, so the result lands at worktree_dir itself.
+    # Use the source repo's name (e.g. "billing-api"), not the worktree's
+    # basename (e.g. "sac-refresh-abc12345"). The worktree is just a
+    # scratch directory; the regenerated scaffold should look like the
+    # original service so cherry-picked developer commits that reference
+    # the package import path apply cleanly. The earlier code passed
+    # `worktree_dir.name` here, which forced the regenerated scaffold to
+    # be named `sac-refresh-<id>` and broke every developer commit that
+    # referenced the original package path.
     ServiceGenerator(
-        name=worktree_dir.name,
+        name=source_name,
         output_dir=worktree_dir,
         in_place=True,
         with_git=True,
