@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  IMAGE_NAME: {{ registry_hostname }}/${{ '{{' }} github.repository_owner {{ '}}' }}/{{ service_name }}
+  IMAGE_NAME: {{ registry_hostname }}/${{ '{{' }} lower(github.repository_owner) {{ '}}' }}/{{ service_name }}
 
 jobs:
   test:
