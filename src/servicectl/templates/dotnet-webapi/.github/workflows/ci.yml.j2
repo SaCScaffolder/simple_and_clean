@@ -6,13 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+# IMAGE_NAME is set in the "Set image name" step at the top of
+# each job that needs it (build, publish). We can't use a GitHub
+# Actions expression function to lowercase github.repository_owner
+# — there is no such function — so we compute it in shell and
+# write to $GITHUB_ENV. This matters for mixed-case org names
+# like SaCScaffolder; Docker requires lowercase repo names.
+
 env:
-  # IMAGE_NAME is set in the "Set image name" step at the top of
-  # each job that needs it (build, publish). We can't use a GitHub
-  # Actions expression function to lowercase github.repository_owner
-  # — there is no such function — so we compute it in shell and
-  # write to $GITHUB_ENV. This matters for mixed-case org names
-  # like SaCScaffolder; Docker requires lowercase repo names.
   DOTNET_VERSION: "8.0.x"
 
 jobs:
