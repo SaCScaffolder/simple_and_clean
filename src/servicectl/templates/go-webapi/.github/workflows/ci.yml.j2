@@ -15,7 +15,12 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: {{ registry_hostname }}/${{ '{{' }} lower(github.repository_owner) {{ '}}' }}/{{ service_name }}
+  # IMAGE_NAME is set in the "Set image name" step at the top of
+  # each job that needs it (build, publish). We can't use a GitHub
+  # Actions expression function to lowercase github.repository_owner
+  # — there is no such function — so we compute it in shell and
+  # write to $GITHUB_ENV. This matters for mixed-case org names
+  # like SaCScaffolder; Docker requires lowercase repo names.
 
 jobs:
   test:
@@ -70,6 +75,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     steps:
+      - name: Set image name
+        run: |
+          {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
+          echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/{{ service_name }}" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: Build image
         run: {% raw %}docker build -t $IMAGE_NAME:${{ github.sha }} .{% endraw %}
@@ -91,6 +100,10 @@ jobs:
     needs: [test, build]
     if: {% raw %}github.event_name == 'push' && github.ref == 'refs/heads/main'{% endraw %}
     steps:
+      - name: Set image name
+        run: |
+          {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
+          echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/{{ service_name }}" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       # Build AND push in one job so the image is available on this runner.
       # The earlier design built in the `build` step and tried to push from a
