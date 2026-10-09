@@ -141,6 +141,58 @@ class SacConfig:
         filtered = {k: v for k, v in d.items() if k in known}
         return cls(**filtered)
 
+    @classmethod
+    def from_v2_dict(cls, d: dict[str, object]) -> "SacConfig":
+        """Translate a v2 spec into a SacConfig.
+
+        The v2 spec nests related fields under `service`, `ci`, and `deploy`
+        objects (e.g. `service.name`, `deploy.target`, `deploy.gcp_region`).
+        The v1 flat shape (the one `SacConfig` natively uses) puts each field
+        at the top level (`name`, `deploy_target`, `gcp_region`). This
+        classmethod projects v2 onto v1 so a v2 spec fed to `--from-config`
+        produces the same `SacConfig` as the equivalent v1 spec.
+
+        Overlays (`overlays.auth`, `overlays.observability`, `overlays.logs`)
+        are silently dropped: the v1 CLI has no corresponding flag, and
+        `SacConfig` does not store overlay state. Documented in
+        `docs/spec-v2.md` as a one-way degradation -- v2 features with no
+        v1 equivalent are skipped.
+
+        Required v2 keys: `service.name` and `template` (per the v2 schema).
+        Other v2 keys default to the same values `SacConfig` would have
+        used if the v1 spec omitted them.
+
+        Raises:
+            KeyError: if `service.name` or `template` is missing. Surfaces
+            to the CLI as a clear error so the user knows which spec field
+            to fix.
+        """
+        if "service" not in d or "name" not in d.get("service", {}):  # type: ignore[operator]
+            raise KeyError("v2 spec missing required 'service.name'")
+        if "template" not in d:
+            raise KeyError("v2 spec missing required 'template'")
+
+        service = d.get("service", {})  # type: ignore[assignment]
+        ci = d.get("ci", {})  # type: ignore[assignment]
+        deploy = d.get("deploy", {})  # type: ignore[assignment]
+
+        v1_flat: dict[str, object] = {
+            "name": service.get("name"),  # type: ignore[attr-defined]
+            "template": d.get("template"),
+            "ci_provider": ci.get("provider", "github-actions"),
+            "coverage_threshold": ci.get("coverage_threshold", 80),
+            "deploy_target": deploy.get("target", "local"),
+            "azure_region": deploy.get("azure_region", "eastus"),
+            "gcp_region": deploy.get("gcp_region", "us-central1"),
+            "gcp_project_id": deploy.get("gcp_project_id"),
+            "registry": d.get("registry", "ghcr"),
+            "db": d.get("database", "postgres"),
+        }
+        # `gcp_project_id` may be null in the v2 spec when the user wants
+        # to defer setting it (the rendered Terraform uses a placeholder).
+        # SacConfig accepts None for that field.
+        return cls.from_dict(v1_flat)
+
 
 def write_config(service_dir: Path, config: SacConfig) -> Path:
     """Write `.servicectl.json` into service_dir.

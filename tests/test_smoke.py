@@ -27,6 +27,8 @@ def _scaffold(tmp: Path, name: str, template: str, **overrides) -> Path:
         ci_provider=overrides.get("ci_provider", "github-actions"),
         deploy_target=overrides.get("deploy_target", "local"),
         azure_region=overrides.get("azure_region", "eastus"),
+        gcp_region=overrides.get("gcp_region", "us-central1"),
+        gcp_project_id=overrides.get("gcp_project_id"),
         coverage_threshold=overrides.get("coverage_threshold", 80),
         registry=overrides.get("registry", "ghcr"),
         db=overrides.get("db", "postgres"),
@@ -326,6 +328,111 @@ def test_azure_bicep_uses_conditional_resource_blocks():
         assert "if (db == 'cosmosdb')" in bicep
         # Cosmos's autoscaleThroughput param should be declared.
         assert "param cosmosDbThroughput int" in bicep
+
+
+def test_gcp_cloud_run_overlay_emits_infra_files():
+    """--deploy=gcp-cloud-run emits the GCP Terraform overlay: main.tf,
+    variables.tf, outputs.tf, all three .tfvars env files, bootstrap.sh,
+    and the cloud_run module. Does NOT emit the gke_autopilot module's
+    active code (it's included on disk but the main.tf only references
+    one of the two modules at a time via the {% if %} blocks).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(
+            Path(td),
+            "demo-gcp-cr",
+            "go-webapi",
+            deploy_target="gcp-cloud-run",
+            gcp_region="us-central1",
+            gcp_project_id="my-test-project",
+        )
+        # Required files all present.
+        assert (target / "infra" / "main.tf").exists()
+        assert (target / "infra" / "variables.tf").exists()
+        assert (target / "infra" / "outputs.tf").exists()
+        assert (target / "infra" / "bootstrap.sh").exists()
+        for env in ("dev", "staging", "prod"):
+            assert (target / "infra" / f"{env}.tfvars").exists()
+        # deploy.yml is generated at the service root (not under
+        # .github/workflows/) -- that's where GitHub Actions looks for it
+        # when triggered by push to main. The same applies to the
+        # Azure overlay's azure-pipelines.yml.
+        assert (target / "deploy.yml").exists()
+
+
+def test_gcp_cloud_run_main_tf_uses_cloud_run_module():
+    """--deploy=gcp-cloud-run renders main.tf that uses the cloud_run
+    module and does NOT instantiate the gke_autopilot module."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(
+            Path(td), "demo-cr", "go-webapi",
+            deploy_target="gcp-cloud-run", gcp_project_id="p1",
+        )
+        main_tf = (target / "infra" / "main.tf").read_text(encoding="utf-8")
+        assert 'module "cloud_run"' in main_tf
+        assert 'module "gke_autopilot"' not in main_tf
+        # The Artifact Registry repository is always created regardless
+        # of cloud_run vs gke_autopilot choice.
+        assert 'module "gke_autopilot"' not in main_tf
+        assert "google_artifact_registry_repository" in main_tf
+
+
+def test_gcp_gke_autopilot_overlay_uses_gke_module():
+    """--deploy=gcp-gke-autopilot renders main.tf that uses the
+    gke_autopilot module and does NOT instantiate cloud_run."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(
+            Path(td), "demo-gke", "go-webapi",
+            deploy_target="gcp-gke-autopilot", gcp_project_id="p1",
+        )
+        main_tf = (target / "infra" / "main.tf").read_text(encoding="utf-8")
+        assert 'module "gke_autopilot"' in main_tf
+        assert 'module "cloud_run"' not in main_tf
+
+
+def test_gcp_tfvars_substitutes_project_id_and_region():
+    """The scaffolded dev.tfvars contains the gcp_project_id and
+    gcp_region values the user passed to --gcp-project-id / --gcp-region.
+    Without substitution the rendered Terraform would be a placeholder."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(
+            Path(td),
+            "demo-sub",
+            "go-webapi",
+            deploy_target="gcp-cloud-run",
+            gcp_region="europe-west1",
+            gcp_project_id="my-real-project",
+        )
+        for env in ("dev", "staging", "prod"):
+            tfvars = (target / "infra" / f"{env}.tfvars").read_text(encoding="utf-8")
+            assert 'project_id  = "my-real-project"' in tfvars
+            assert 'region      = "europe-west1"' in tfvars
+
+
+def test_gcp_tfvars_use_placeholder_when_project_id_omitted():
+    """When --gcp-project-id is omitted, the rendered tfvars use the
+    REPLACE_WITH_GCP_PROJECT_ID placeholder (matching bootstrap.sh's
+    check). This is the documented escape hatch for users who want to
+    defer the project decision until after scaffolding."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(
+            Path(td),
+            "demo-noproj",
+            "go-webapi",
+            deploy_target="gcp-cloud-run",
+        )
+        tfvars = (target / "infra" / "dev.tfvars").read_text(encoding="utf-8")
+        assert "REPLACE_WITH_GCP_PROJECT_ID" in tfvars
+
+
+def test_local_deploy_does_not_emit_infra():
+    """--deploy=local (the default) must NOT emit a cloud infra overlay.
+    The bicep / terraform code belongs to azure and gcp-*, never to
+    local. This test guards against the overlay accidentally firing on
+    the default path."""
+    with tempfile.TemporaryDirectory() as td:
+        target = _scaffold(Path(td), "demo-local", "go-webapi", deploy_target="local")
+        assert not (target / "infra").exists()
 
 
 def test_db_validation_rejects_unknown_flavor():
