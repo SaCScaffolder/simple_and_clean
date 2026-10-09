@@ -86,9 +86,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test, build]
     if: {% raw %}github.event_name == 'push' && github.ref == 'refs/heads/main'{% endraw %}
+    # The publish job pushes to {{ registry_hostname }} -- that push uses
+    # an App installation token (minted in this job below), NOT
+    # GITHUB_TOKEN, because GITHUB_TOKEN's packages: write is repo-scoped
+    # and the image is in the org's package namespace. So we keep the
+    # GITHUB_TOKEN scope minimal here: just contents: read.
     permissions:
       contents: read
-      packages: write
     steps:
       - name: Set image name
         run: |
@@ -96,11 +100,31 @@ jobs:
           echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/{{ service_name }}" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
 
+      # Mint an App installation token for the docker login. The App
+      # has org-level packages: write (it's installed on the org),
+      # so the token can push to {{ registry_hostname }}/<org>/<image>
+      # from any repo in the org. GITHUB_TOKEN's packages: write is
+      # repo-level and only authorizes pushing to packages in the
+      # *current repo's* namespace -- which is not where the image
+      # lives (the image name is the service name, not the repo name).
+      #
+      # APP_ID and APP_PRIVATE_KEY are expected to be available as
+      # org-level secrets (preferred -- inherited by every repo
+      # including the per-PR `_pr_<n>` repos the integration test
+      # creates) or as repo-level secrets on every scaffolded repo.
+      - name: Mint installation token from GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: {% raw %}${{ secrets.APP_ID }}{% endraw %}
+          private-key: {% raw %}${{ secrets.APP_PRIVATE_KEY }}{% endraw %}
+          owner: {% raw %}${{ github.repository_owner }}{% endraw %}
+
       - uses: docker/login-action@v3
         with:
           registry: {{ registry }}
           username: {% raw %}${{ github.actor }}{% endraw %}
-          password: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
+          password: {% raw %}${{ steps.app-token.outputs.token }}{% endraw %}
 
       - name: Push image
         run: |
