@@ -229,10 +229,24 @@ def init(
         # only understands top-level keys (it would silently drop the
         # nested object and default `deploy_target` to "local").
         #
-        # Detection rule: an explicit `schema_version: 2` opts in. A
-        # missing `schema_version` falls through to v1 (preserves
-        # backward compat for any old flat spec that lacks the field).
-        if file_cfg.get("schema_version") == 2:
+        # Detection rule (two-tier, both win):
+        #   (a) An explicit `schema_version: 2` opts in.
+        #   (b) Absent that, ANY v2-only top-level key (`service`, `ci`,
+        #       `deploy`, `overlays`) implies v2. This catches specs that
+        #       are structurally v2 but lack the `schema_version` field
+        #       -- which is the common case for hand-written specs and
+        #       for any spec produced before #95 was merged. The previous
+        #       rule (schema_version only) silently dropped these.
+        #   (c) Old v1 flat specs (no `schema_version`, none of the
+        #       v2-only keys) still fall through to the v1 path.
+        #
+        # Either signal wins; both routes use the same translator.
+        _V2_ONLY_TOP_LEVEL_KEYS = frozenset({"service", "ci", "deploy", "overlays"})
+        is_v2_spec = (
+            file_cfg.get("schema_version") == 2
+            or bool(set(file_cfg.keys()) & _V2_ONLY_TOP_LEVEL_KEYS)
+        )
+        if is_v2_spec:
             try:
                 translated = SacConfig.from_v2_dict(file_cfg)
             except KeyError as e:
@@ -248,6 +262,11 @@ def init(
             v1_flat.pop("schema_version", None)
             v1_flat.pop("sac_version", None)
             v1_flat.pop("sac_base_commit", None)
+            # `SacConfig` does not store `name` (it's the directory name,
+            # resolved separately). Recover it from the v2 spec's
+            # `service.name` so the rest of the merge loop can find it
+            # in `file_cfg`.
+            v1_flat["name"] = file_cfg.get("service", {}).get("name")
             file_cfg = v1_flat
 
         # Map of CLI option name -> ServiceGenerator kwarg name. Must stay

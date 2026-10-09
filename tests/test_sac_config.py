@@ -302,6 +302,152 @@ class FromV2DictTests(unittest.TestCase):
         self.assertEqual(cfg.deploy_target, "gcp-cloud-run")
         self.assertEqual(cfg.template, "go-webapi")
 
+    def test_structurally_v2_spec_without_schema_version_field(self):
+        """A spec that is STRUCTURALLY v2 (nested `service` / `deploy`
+        objects) but lacks the explicit `schema_version: 2` field is
+        still v2. The CLI detects this via the v2-only top-level keys,
+        not via the schema_version field. The translator must produce
+        a SacConfig with the right deploy_target and gcp_project_id.
+
+        Regression: this is the exact shape of the first GCP test
+        scaffold the user ran, which fell through to v1 silently and
+        scaffolded a `local` deploy with no `infra/` overlay. Fixed in
+        follow-up to #95 by widening the v2 detection rule."""
+        v2_no_schema_version = {
+            "service": {"name": "ala_service_gcp"},
+            "template": "go-webapi",
+            "ci": {"provider": "github-actions", "coverage_threshold": 85},
+            "deploy": {
+                "target": "gcp-cloud-run",
+                "gcp_region": "us-central1",
+                "gcp_project_id": "sacscaffolder",
+            },
+            "registry": "gar",
+            "database": "postgres",
+            "overlays": {"auth": "oidc", "observability": "opentelemetry"},
+        }
+        cfg = SacConfig.from_v2_dict(v2_no_schema_version)
+        self.assertEqual(cfg.deploy_target, "gcp-cloud-run")
+        self.assertEqual(cfg.gcp_project_id, "sacscaffolder")
+        self.assertEqual(cfg.gcp_region, "us-central1")
+        self.assertEqual(cfg.coverage_threshold, 85)
+        self.assertEqual(cfg.registry, "gar")
+        self.assertEqual(cfg.db, "postgres")
+        # Overlays still dropped silently -- v1 has no slot for them.
+
+
+class CLIV2DetectionTests(unittest.TestCase):
+    """End-to-end CLI tests for the `--from-config` v2 detection rule.
+
+    These exercise the actual `servicectl init` Click command with a
+    real spec file on disk, asserting that the deploy target lands in
+    `.servicectl.json` correctly. Unit tests on `SacConfig.from_v2_dict`
+    cover the translator in isolation; these cover the CLI's choice
+    of reader.
+
+    Regression target: the first GCP test scaffold the user ran used
+    a structurally v2 spec WITHOUT a `schema_version: 2` field. The
+    detection rule that ships in #95 only checked `schema_version`,
+    so the spec fell through to v1 and the deploy target was dropped
+    silently. Widening the rule to also check for v2-only top-level
+    keys (`service`, `ci`, `deploy`, `overlays`) catches structural
+    v2 even without the schema_version marker.
+    """
+
+    def test_v2_spec_without_schema_version_uses_v2_reader(self):
+        """A spec file with nested `service` / `deploy` but no
+        `schema_version` field is still detected as v2 and routes
+        through `from_v2_dict`. The CLI's success panel reports the
+        GCP deploy target, and the `infra/` overlay is emitted.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            spec_path = td_path / "spec.json"
+            spec_path.write_text(json.dumps({
+                "service": {"name": "test-svc"},
+                "template": "go-webapi",
+                "ci": {"provider": "github-actions", "coverage_threshold": 85},
+                "deploy": {
+                    "target": "gcp-cloud-run",
+                    "gcp_region": "us-central1",
+                    "gcp_project_id": "my-real-project",
+                },
+                "registry": "gar",
+                "database": "postgres",
+            }))
+            output_dir = td_path / "out"
+            output_dir.mkdir()
+
+            from click.testing import CliRunner
+            from servicectl.cli import main as cli_main
+            runner = CliRunner()
+            result = runner.invoke(
+                cli_main,
+                [
+                    "init",
+                    "--from-config", str(spec_path),
+                    "--output-dir", str(output_dir),
+                    "--no-git",
+                ],
+                catch_exceptions=False,
+            )
+            # Command should succeed.
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+
+            # The success panel should report the GCP deploy target.
+            # (The Rich-formatted panel is captured in `result.output`.)
+            self.assertIn("gcp-cloud-run", result.output)
+            self.assertIn("us-central1", result.output)
+            self.assertIn("my-real-project", result.output)
+
+            # The infra/ overlay should have been emitted.
+            scaffold = output_dir / "test-svc"
+            self.assertTrue(
+                (scaffold / "infra" / "main.tf").exists(),
+                f"expected infra/main.tf to be rendered; got files: "
+                f"{[str(p.relative_to(scaffold)) for p in scaffold.rglob('*') if p.is_file()]}",
+            )
+            self.assertTrue((scaffold / "infra" / "dev.tfvars").exists())
+            self.assertTrue((scaffold / "infra" / "bootstrap.sh").exists())
+            self.assertTrue((scaffold / "deploy.yml").exists())
+
+    def test_v1_flat_spec_still_uses_v1_reader(self):
+        """A spec file with v1 flat keys and no nested objects goes
+        through the v1 path. The success panel reports the deploy
+        target from the v1 keys."""
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            spec_path = td_path / "spec.json"
+            spec_path.write_text(json.dumps({
+                "schema_version": 1,
+                "name": "test-svc",
+                "template": "go-webapi",
+                "deploy_target": "gcp-cloud-run",
+                "gcp_region": "europe-west1",
+                "gcp_project_id": "v1-project",
+            }))
+            output_dir = td_path / "out"
+            output_dir.mkdir()
+
+            from click.testing import CliRunner
+            from servicectl.cli import main as cli_main
+            runner = CliRunner()
+            result = runner.invoke(
+                cli_main,
+                [
+                    "init",
+                    "--from-config", str(spec_path),
+                    "--output-dir", str(output_dir),
+                    "--no-git",
+                ],
+                catch_exceptions=False,
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            # v1 path also produces the GCP deploy target correctly.
+            self.assertIn("gcp-cloud-run", result.output)
+            self.assertIn("europe-west1", result.output)
+            self.assertIn("v1-project", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()
