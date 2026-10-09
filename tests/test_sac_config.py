@@ -202,5 +202,106 @@ class ResolveSacBaseCommitTests(unittest.TestCase):
         self.assertIsNone(resolve_sac_base_commit(c))
 
 
+class FromV2DictTests(unittest.TestCase):
+    """`SacConfig.from_v2_dict` translates a v2 spec into the v1 flat
+    shape the rest of the scaffolder uses. v2 nests related fields under
+    `service` / `ci` / `deploy`; v1 keeps them at the top level. Without
+    this translation, `servicectl init --from-config=specs/examples/*.json`
+    silently dropped the deploy target and defaulted to `local`.
+    """
+
+    def test_minimal_v2_spec(self):
+        """A v2 spec with only the required keys produces a usable
+        SacConfig, with non-specified fields taking the v1 defaults."""
+        v2 = {
+            "schema_version": 2,
+            "service": {"name": "billing-api"},
+            "template": "go-webapi",
+        }
+        cfg = SacConfig.from_v2_dict(v2)
+        self.assertEqual(cfg.template, "go-webapi")
+        # v1 defaults for everything else
+        self.assertEqual(cfg.ci_provider, "github-actions")
+        self.assertEqual(cfg.deploy_target, "local")
+        self.assertEqual(cfg.coverage_threshold, 80)
+        self.assertEqual(cfg.registry, "ghcr")
+        self.assertEqual(cfg.db, "postgres")
+
+    def test_full_v2_spec_with_gcp(self):
+        """A complete v2 spec translates every field to its v1
+        counterpart with no values dropped (other than `overlays.*`,
+        which have no v1 slot)."""
+        v2 = {
+            "schema_version": 2,
+            "service": {"name": "billing-api", "description": "..."},
+            "template": "go-webapi",
+            "ci": {"provider": "github-actions", "coverage_threshold": 85},
+            "deploy": {
+                "target": "gcp-cloud-run",
+                "gcp_region": "us-central1",
+                "gcp_project_id": "my-gcp-project",
+            },
+            "registry": "gar",
+            "database": "postgres",
+            "overlays": {"auth": "oidc", "observability": "opentelemetry"},
+        }
+        cfg = SacConfig.from_v2_dict(v2)
+        self.assertEqual(cfg.template, "go-webapi")
+        self.assertEqual(cfg.ci_provider, "github-actions")
+        self.assertEqual(cfg.coverage_threshold, 85)
+        self.assertEqual(cfg.deploy_target, "gcp-cloud-run")
+        self.assertEqual(cfg.gcp_region, "us-central1")
+        self.assertEqual(cfg.gcp_project_id, "my-gcp-project")
+        self.assertEqual(cfg.registry, "gar")
+        self.assertEqual(cfg.db, "postgres")
+        # Overlays have no v1 representation -- silently dropped. The
+        # v2 spec promises `additionalProperties: false` on `overlays`
+        # so unknown keys would already be rejected by a strict validator;
+        # here we only care that the translation doesn't crash on them.
+
+    def test_v2_missing_service_name_raises(self):
+        """v2 spec without `service.name` raises KeyError with a clear
+        message identifying the missing field."""
+        v2 = {"schema_version": 2, "template": "go-webapi"}
+        with self.assertRaises(KeyError) as cm:
+            SacConfig.from_v2_dict(v2)
+        self.assertIn("service.name", str(cm.exception))
+
+    def test_v2_missing_template_raises(self):
+        """v2 spec without `template` raises KeyError."""
+        v2 = {"schema_version": 2, "service": {"name": "x"}}
+        with self.assertRaises(KeyError) as cm:
+            SacConfig.from_v2_dict(v2)
+        self.assertIn("template", str(cm.exception))
+
+    def test_v2_gcp_project_id_may_be_null(self):
+        """`deploy.gcp_project_id: null` is allowed -- the user wants
+        to defer setting the project until after scaffolding. SacConfig
+        accepts None for that field."""
+        v2 = {
+            "schema_version": 2,
+            "service": {"name": "x"},
+            "template": "go-webapi",
+            "deploy": {"target": "gcp-cloud-run", "gcp_project_id": None},
+        }
+        cfg = SacConfig.from_v2_dict(v2)
+        self.assertIsNone(cfg.gcp_project_id)
+
+    def test_v1_spec_does_not_use_from_v2_dict(self):
+        """v1 specs (no schema_version field, or schema_version: 1)
+        should be parsed by `from_dict`, NOT `from_v2_dict`. This test
+        documents the contract: callers pick the right reader based on
+        the schema_version value."""
+        v1 = {
+            "schema_version": 1,
+            "name": "billing-api",
+            "template": "go-webapi",
+            "deploy_target": "gcp-cloud-run",
+        }
+        cfg = SacConfig.from_dict(v1)
+        self.assertEqual(cfg.deploy_target, "gcp-cloud-run")
+        self.assertEqual(cfg.template, "go-webapi")
+
+
 if __name__ == "__main__":
     unittest.main()

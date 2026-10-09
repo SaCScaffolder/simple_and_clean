@@ -223,6 +223,33 @@ def init(
             )
             sys.exit(2)
 
+        # Detect v2 spec shape and translate to v1 flat keys before the
+        # rest of the merge logic runs. v2 specs nest related fields
+        # under `service` / `ci` / `deploy` objects; the v1 path below
+        # only understands top-level keys (it would silently drop the
+        # nested object and default `deploy_target` to "local").
+        #
+        # Detection rule: an explicit `schema_version: 2` opts in. A
+        # missing `schema_version` falls through to v1 (preserves
+        # backward compat for any old flat spec that lacks the field).
+        if file_cfg.get("schema_version") == 2:
+            try:
+                translated = SacConfig.from_v2_dict(file_cfg)
+            except KeyError as e:
+                err_console.print(
+                    f"[bold red]error:[/bold red] --from-config {from_config} is a v2 spec "
+                    f"but is invalid: {e}"
+                )
+                sys.exit(2)
+            # Project the SacConfig back onto the v1 flat shape the
+            # rest of this function expects. Drops `schema_version` and
+            # other bookkeeping fields that v1 has no slot for.
+            v1_flat = translated.to_dict()
+            v1_flat.pop("schema_version", None)
+            v1_flat.pop("sac_version", None)
+            v1_flat.pop("sac_base_commit", None)
+            file_cfg = v1_flat
+
         # Map of CLI option name -> ServiceGenerator kwarg name. Must stay
         # in sync with the options above. If you add a new option, add it here too.
         cli_to_kwarg = {
