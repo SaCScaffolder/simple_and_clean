@@ -87,13 +87,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test, build]
     if: {% raw %}github.event_name == 'push' && github.ref == 'refs/heads/main'{% endraw %}
-    # The publish job pushes to {{ registry_hostname }} -- that push uses
-    # an App installation token (minted in this job below), NOT
-    # GITHUB_TOKEN, because GITHUB_TOKEN's packages: write is repo-scoped
-    # and the image is in the org's package namespace. So we keep the
-    # GITHUB_TOKEN scope minimal here: just contents: read.
+    # The publish job pushes to {{ registry_hostname }} with GITHUB_TOKEN.
+    # The image is in the current repo's own package namespace (see
+    # "Set image name" step), so GITHUB_TOKEN's repo-level packages: write
+    # covers the push. We still keep contents: read for checkout (no
+    # code is written back).
     permissions:
       contents: read
+      packages: write
     steps:
       - name: Set image name
         run: |
@@ -101,42 +102,22 @@ jobs:
           REPO=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
           echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/${REPO}" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
-
-      # Mint an App installation token for the docker login. The image
-      # name is per-repo (see "Set image name" step) so the image
-      # lives in the current repo's package namespace on {{ registry_hostname }},
-      # and the App installation's repo-level Packages: write covers
-      # it. GITHUB_TOKEN's packages: write is also repo-level but
-      # requires the org's "Workflow permissions" setting to be
-      # "Read and write" -- we use the App token instead to avoid
-      # that org-level coupling.
-      #
-      # Previously the image name was the service name, not the repo
-      # name, which put the image in the org's package namespace and
-      # required org-level packages: write on the App installation.
-      # The org doesn't grant that scope (verified via run 37877401703,
-      # 2026-10-09), so the previous design pushed to an unauthorized
-      # location and failed with
-      # `installation not allowed to Write organization package`.
-      # Per-repo image names sidestep the org-package grant entirely.
-      #
-      # APP_ID and APP_PRIVATE_KEY are expected to be available as
-      # org-level secrets (preferred -- inherited by every repo
-      # including the per-PR `_pr_<n>` repos the integration test
-      # creates) or as repo-level secrets on every scaffolded repo.
-      - name: Mint installation token from GitHub App
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: {% raw %}${{ secrets.APP_ID }}{% endraw %}
-          private-key: {% raw %}${{ secrets.APP_PRIVATE_KEY }}{% endraw %}
-          owner: {% raw %}${{ github.repository_owner }}{% endraw %}
-
+      # Log in to {{ registry }} with the workflow's GITHUB_TOKEN. The
+      # image is in the current repo's own package namespace (see
+      # "Set image name" step), so GITHUB_TOKEN's repo-level
+      # packages: write covers the push. This is the standard
+      # GitHub-supported way to push to ghcr.io -- the docs note that
+      # GitHub Packages only supports authentication using a personal
+      # access token (classic) or GITHUB_TOKEN, not GitHub App
+      # installation tokens
+      # (https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+      # The org's "Workflow permissions" setting must be "Read and
+      # write" for GITHUB_TOKEN to carry that scope.
       - uses: docker/login-action@v3
         with:
           registry: {{ registry }}
           username: {% raw %}${{ github.actor }}{% endraw %}
-          password: {% raw %}${{ steps.app-token.outputs.token }}{% endraw %}
+          password: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
 
       - name: Push image
         run: |
