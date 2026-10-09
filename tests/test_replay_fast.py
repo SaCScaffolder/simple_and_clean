@@ -316,27 +316,38 @@ class RefreshLiveFastPathTests(unittest.TestCase):
             call_log.append(cmd)
             cmd_str = " ".join(cmd)
             # classify_history's `git log --format=%H` => all SHAs newest-first.
-            if "log" in cmd and "--format=%H" in cmd and "trailers" not in cmd_str:
+            if "log" in cmd and "--format=%H" in cmd and "trailers" not in cmd_str and "%B" not in cmd_str:
                 return mock.Mock(
                     returncode=0,
                     stdout="\n".join(all_shas) + "\n",
                     stderr="",
                 )
-            # is_sac_managed's `git log --format=%(trailers:key=SAC-Managed,valueonly)`.
-            # The -n 1 and final SHA position determine which commit we're
-            # reading. SAC-managed SHA returns "true"; others return "".
-            if "trailers" in cmd_str and "SAC-Managed" in cmd_str:
-                # Last arg is the SHA we want trailers for.
+            # read_trailer's `git log --format=%B -n 1 <sha>` => full commit
+            # body for the SHA. SAC-managed SHA returns the body with
+            # trailers; others return prose-only bodies with no trailers
+            # (so the relaxed parser in sac_trailers.read_trailer returns
+            # empty for every SAC-* key, and is_sac_managed() returns False).
+            if "%B" in cmd_str and "-n" in cmd:
                 target_sha = cmd[-1]
-                is_sac = target_sha == sac_sha
+                if target_sha == sac_sha:
+                    return mock.Mock(
+                        returncode=0,
+                        stdout=(
+                            "Initial scaffold\n"
+                            "\n"
+                            "SAC-Managed: true\n"
+                            "SAC-Operation: scaffold\n"
+                            "SAC-Spec-Version: 1\n"
+                            "SAC-Version: 0.1.0\n"
+                        ),
+                        stderr="",
+                    )
+                # Non-SAC commits: prose only, no trailers.
                 return mock.Mock(
                     returncode=0,
-                    stdout="true\n" if is_sac else "\n",
+                    stdout="user work\n" if target_sha in developer_shas else "initial\n",
                     stderr="",
                 )
-            # read_trailer for other keys (operation, spec, version): empty.
-            if "trailers" in cmd_str:
-                return mock.Mock(returncode=0, stdout="", stderr="")
             # git rev-parse HEAD => deadbeef
             if "rev-parse" in cmd:
                 return mock.Mock(returncode=0, stdout="deadbeef\n", stderr="")
@@ -380,22 +391,32 @@ class RefreshLiveFastPathTests(unittest.TestCase):
         def fake_run(args, **kwargs):
             cmd = [str(x) for x in args]
             cmd_str = " ".join(cmd)
-            if "log" in cmd and "--format=%H" in cmd and "trailers" not in cmd_str:
+            if "log" in cmd and "--format=%H" in cmd and "trailers" not in cmd_str and "%B" not in cmd_str:
                 return mock.Mock(
                     returncode=0,
                     stdout="\n".join(all_shas) + "\n",
                     stderr="",
                 )
-            if "trailers" in cmd_str and "SAC-Managed" in cmd_str:
+            if "%B" in cmd_str and "-n" in cmd:
                 target_sha = cmd[-1]
-                is_sac = target_sha == sac_sha
+                if target_sha == sac_sha:
+                    return mock.Mock(
+                        returncode=0,
+                        stdout=(
+                            "Initial scaffold\n"
+                            "\n"
+                            "SAC-Managed: true\n"
+                            "SAC-Operation: scaffold\n"
+                            "SAC-Spec-Version: 1\n"
+                            "SAC-Version: 0.1.0\n"
+                        ),
+                        stderr="",
+                    )
                 return mock.Mock(
                     returncode=0,
-                    stdout="true\n" if is_sac else "\n",
+                    stdout="user work\n" if target_sha == all_shas[0] else "initial\n",
                     stderr="",
                 )
-            if "trailers" in cmd_str:
-                return mock.Mock(returncode=0, stdout="", stderr="")
             return mock.Mock(returncode=0, stdout="deadbeef\n", stderr="")
 
         with mock.patch("subprocess.run", side_effect=fake_run), \

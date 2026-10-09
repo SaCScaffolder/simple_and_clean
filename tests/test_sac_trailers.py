@@ -310,5 +310,88 @@ class ClassifyHistoryLegacyTests(unittest.TestCase):
             classify_history(self.repo, sac_base_commit="0000000000000000000000000000000000000000")
 
 
+class BlankLineTrailerRegressionTests(unittest.TestCase):
+    """Regression: commits whose trailers are separated by blank lines
+    (the form produced when a writer mistakenly uses one `-m` arg
+    per trailer instead of bundling them into a single `-m` arg
+    with embedded newlines) must still classify as SAC-managed.
+
+    Background: `git log --format=%(trailers:key=X,valueonly)` is
+    strict -- a blank line between trailers is treated as a
+    paragraph break, so the trailers are silently unparseable and
+    `is_sac_managed` returns False. This bit us in the
+    integration-test-modified workflow's bootstrap step, where
+    one prior revision used `git commit -m subject -m SAC-Managed: true
+    -m SAC-Operation: bootstrap ...` and produced commits the
+    refresh engine could not recognize as SAC. The fix is in
+    `read_trailer`: replace the strict git format placeholder with
+    `git log --format=%B` plus a relaxed in-process parser.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = _init_repo(Path(self._tmp.name))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _commit_with_broken_trailers(self) -> str:
+        """The exact form that triggered the regression: one -m per trailer,
+        which produces blank lines between trailers in the message body.
+        """
+        testfile = self.repo / "test.txt"
+        testfile.write_text("hello\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(
+            [
+                "git", "-C", str(self.repo), "commit", "-q",
+                "-m", "Bootstrap: scaffold service from simple_and_clean",
+                "-m", "SAC-Managed: true",
+                "-m", "SAC-Operation: bootstrap",
+                "-m", "SAC-Spec-Version: 1",
+                "-m", "SAC-Version: abc1234",
+            ],
+            check=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    def test_broken_form_classifies_as_sac_managed(self):
+        """is_sac_managed returns True even for the broken trailer form."""
+        sha = self._commit_with_broken_trailers()
+        self.assertTrue(is_sac_managed(self.repo, sha))
+
+    def test_broken_form_reads_each_trailer(self):
+        """read_trailer returns the correct value for every SAC key,
+        even when the trailers are separated by blank lines."""
+        sha = self._commit_with_broken_trailers()
+        self.assertEqual(read_trailer(self.repo, sha, "SAC-Managed"), "true")
+        self.assertEqual(read_trailer(self.repo, sha, "SAC-Operation"), "bootstrap")
+        self.assertEqual(read_trailer(self.repo, sha, "SAC-Spec-Version"), "1")
+        self.assertEqual(read_trailer(self.repo, sha, "SAC-Version"), "abc1234")
+
+    def test_broken_form_round_trips_through_classify_history(self):
+        """classify_history buckets the broken-form commit into 'sac'."""
+        sha = self._commit_with_broken_trailers()
+        result = classify_history(self.repo)
+        # Init commit (untagged) is developer; broken-form SAC commit is sac.
+        self.assertIn(sha, result["sac"])
+        self.assertNotIn(sha, result["developer"])
+        self.assertEqual(len(result["sac"]), 1)
+
+    def test_strict_form_still_works(self):
+        """The relaxed parser still handles the strict (correct) form
+        produced by `commit_message_with_trailers`. No regression on
+        the happy path."""
+        t = SacTrailers(operation="scaffold", version="0.1.0")
+        subject, trailers = commit_message_with_trailers("Initial scaffold", t)
+        sha = _commit(self.repo, [subject, trailers], file_content="y")
+
+        self.assertTrue(is_sac_managed(self.repo, sha))
+        self.assertEqual(read_trailer(self.repo, sha, "SAC-Operation"), "scaffold")
+
+
 if __name__ == "__main__":
     unittest.main()
