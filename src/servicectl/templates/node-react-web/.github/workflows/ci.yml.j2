@@ -61,8 +61,9 @@ jobs:
     steps:
       - name: Set image name
         run: |
-          {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
-          echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/{{ service_name }}" >> "$GITHUB_ENV"
+          {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          REPO=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
+          echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/${REPO}" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
 
       - name: Build image
@@ -96,17 +97,28 @@ jobs:
     steps:
       - name: Set image name
         run: |
-          {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
-          echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/{{ service_name }}" >> "$GITHUB_ENV"
+          {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          REPO=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
+          echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/${REPO}" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
 
-      # Mint an App installation token for the docker login. The App
-      # has org-level packages: write (it's installed on the org),
-      # so the token can push to {{ registry_hostname }}/<org>/<image>
-      # from any repo in the org. GITHUB_TOKEN's packages: write is
-      # repo-level and only authorizes pushing to packages in the
-      # *current repo's* namespace -- which is not where the image
-      # lives (the image name is the service name, not the repo name).
+      # Mint an App installation token for the docker login. The image
+      # name is per-repo (see "Set image name" step) so the image
+      # lives in the current repo's package namespace on {{ registry_hostname }},
+      # and the App installation's repo-level Packages: write covers
+      # it. GITHUB_TOKEN's packages: write is also repo-level but
+      # requires the org's "Workflow permissions" setting to be
+      # "Read and write" -- we use the App token instead to avoid
+      # that org-level coupling.
+      #
+      # Previously the image name was the service name, not the repo
+      # name, which put the image in the org's package namespace and
+      # required org-level packages: write on the App installation.
+      # The org doesn't grant that scope (verified via run 37877401703,
+      # 2026-10-09), so the previous design pushed to an unauthorized
+      # location and failed with
+      # `installation not allowed to Write organization package`.
+      # Per-repo image names sidestep the org-package grant entirely.
       #
       # APP_ID and APP_PRIVATE_KEY are expected to be available as
       # org-level secrets (preferred -- inherited by every repo
