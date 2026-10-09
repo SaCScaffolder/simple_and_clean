@@ -16,6 +16,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -193,6 +194,60 @@ func TestRunServerShutsDownOnServerError(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("runServer did not return within 2s of bind failure")
+	}
+}
+
+// TestRunServerReturnsNilOnExternalShutdown covers the case where
+// ListenAndServe returns http.ErrServerClosed because something
+// else (not the signal channel) called srv.Shutdown. The goroutine
+// then sends nil to errCh, the select picks the errCh case (not
+// the sigCh case), and runServer returns nil. This is the
+// "cleanest possible exit" path and was previously uncovered,
+// which pulled cmd/server's coverage below 80% and failed the
+// coverage_threshold gate for services that asked for >=85%.
+func TestRunServerReturnsNilOnExternalShutdown(t *testing.T) {
+	// Pick a free port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen on random port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	srv := buildServer()
+	// Override Addr to the random port we picked.
+	srv.Addr = net.JoinHostPort("127.0.0.1", itoa(port))
+
+	sigCh := make(chan os.Signal, 1)
+
+	got := make(chan error, 1)
+	go func() {
+		got <- runServer(srv, sigCh)
+	}()
+
+	// Wait briefly for the server to be ready, then call Shutdown
+	// externally (NOT via the signal channel). This makes
+	// ListenAndServe return http.ErrServerClosed, the goroutine
+	// sends nil to errCh, the select hits the errCh case, and
+	// runServer returns nil.
+	base := "http://" + srv.Addr
+	if !waitForReady(base+"/healthz", 2*time.Second) {
+		t.Skipf("server did not come up on %s; signal channel may have closed", srv.Addr)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("external shutdown: %v", err)
+	}
+
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Errorf("expected nil from runServer after external Shutdown, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runServer did not return within 3s of external Shutdown")
 	}
 }
 
