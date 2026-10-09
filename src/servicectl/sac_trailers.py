@@ -39,6 +39,7 @@ relies on trailer *absence* to mean "developer."
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,8 +70,14 @@ class SacTrailers:
             SAC-Spec-Version: 1
             SAC-Version: 0.1.0
 
-        Each trailer on its own line. Caller is responsible for the
-        blank line separating the trailer block from the commit subject.
+        Each trailer on its own line. Callers MUST pass the result as
+        a SINGLE `-m` arg (one paragraph, embedded newlines), not one
+        `-m` per trailer line. The latter puts each trailer in its
+        own paragraph separated by blank lines, which breaks git's
+        strict `%(trailers:...)` parser -- the trailers become
+        unparseable and `is_sac_managed` reports False. Use the
+        `commit_message_with_trailers()` helper to get the right
+        `-m` arg list and avoid this footgun.
         """
         return "\n".join(
             [
@@ -107,23 +114,60 @@ def commit_message_with_trailers(subject: str, trailers: SacTrailers) -> list[st
 # ----------------------------- Reading trailers -----------------------------
 
 
+# Relaxed-trailer grammar: a line matching `^Key: Value$` anywhere in
+# the commit body is treated as a trailer. This is broader than git's
+# native `%(trailers)` parser, which requires trailers to live in a
+# single trailing paragraph with no blank lines between them. We use
+# the broader grammar so that commits written with one `-m` arg per
+# trailer line (a common mistake) still classify correctly. The
+# downside is that we will pick up non-trailer lines that happen to
+# match the regex; SAC trailers are namespaced (SAC-Managed,
+# SAC-Operation, SAC-Spec-Version, SAC-Version) and unlikely to
+# collide with prose.
+_TRAILER_LINE_RE = re.compile(r"^([A-Za-z][A-Za-z0-9-]*)\s*:\s*(.*)$")
+
+
+def _parse_trailers_from_body(body: str) -> dict[str, str]:
+    """Scan a commit body and return all `Key: Value` lines as trailers.
+
+    Accepts the form produced by `commit_message_with_trailers()`
+    (subject + a single `-m` arg with embedded newlines) AND the form
+    produced by mistake (one `-m` arg per trailer line, which inserts
+    blank lines between trailers and breaks git's strict parser).
+
+    The `git log --format=%(trailers:key=X,valueonly)` placeholder
+    returns empty for the broken form; this relaxed parser returns
+    the correct value. See `test_sac_trailers.py::
+    SacTrailersParserRegressionTests` for the regression case.
+    """
+    trailers: dict[str, str] = {}
+    for line in body.splitlines():
+        match = _TRAILER_LINE_RE.match(line)
+        if match:
+            trailers[match.group(1)] = match.group(2).strip()
+    return trailers
+
+
 def read_trailer(repo: Path, sha: str, key: str) -> str:
     """Read a single SAC trailer value from a commit.
 
-    Uses git log --format=%(trailers:key=<KEY>,valueonly) which prints
-    the value (with no key prefix) or empty if the trailer is absent.
-
-    The format placeholders have to be Git-fetched from the local repo,
-    so callers must pass a real git working directory.
+    Uses `git log --format=%B` (full body) and a relaxed in-process
+    parse, rather than `git log --format=%(trailers:key=X,valueonly)`.
+    The latter rejects commits whose trailers are separated by blank
+    lines, which happens whenever a writer uses one `-m` arg per
+    trailer instead of bundling the trailer block into a single
+    `-m` arg with embedded newlines. (See SacTrailers.render's
+    docstring for the contract.) The relaxed parser accepts both
+    forms, so old commits written with the broken shape still
+    classify correctly going forward.
     """
-    placeholder = f"%(trailers:key={key},valueonly)"
     result = subprocess.run(
-        ["git", "-C", str(repo), "log", f"--format={placeholder}", "-n", "1", sha],
+        ["git", "-C", str(repo), "log", "--format=%B", "-n", "1", sha],
         capture_output=True,
         text=True,
         check=True,
     )
-    return result.stdout.strip()
+    return _parse_trailers_from_body(result.stdout).get(key, "")
 
 
 def read_trailers(repo: Path, sha: str) -> dict[str, str]:
