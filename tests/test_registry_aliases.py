@@ -1,0 +1,166 @@
+"""Tests for registry alias expansion in the scaffolder.
+
+The generator accepts short aliases (`ghcr`, `gar`, `gcr`, etc.) on the
+command line and the spec, but Docker image refs and
+`docker/login-action`'s `registry:` field need the full hostname. These
+tests pin the alias map so the rendered CI workflow points at a
+syntactically valid registry and the image push can resolve.
+
+Bug history (Oct 2026): `_registry_hostname()` shipped without a `gar`
+entry. Scaffolds with `registry: gar` rendered `IMAGE_NAME=gar/...`
+verbatim, and `docker/login-action` failed every push with
+`lookup gar on 127.0.0.53:53: server misbehaving`. GAR also needs the
+GCP project ID baked into the image path (it's not in
+`github.repository_owner`), so the workflow templates substitute
+`gcp_project_id` instead of `${OWNER}` when the registry is GAR.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from servicectl.generator import ServiceGenerator  # noqa: E402
+
+
+def _gen(**overrides) -> ServiceGenerator:
+    """Build a ServiceGenerator with GAR + GCP defaults baked in.
+
+    `name` is set to a stable value so we can assert on rendered output.
+    For pure-logic tests (no `.run()`), `output_dir` is a unique mkdtemp
+    path so back-to-back tests don't collide. The scaffold-render tests
+    typically override `output_dir` to a `tempfile.TemporaryDirectory()`.
+    """
+    import tempfile
+    defaults = dict(
+        name="gar-test-svc",
+        template="go-webapi",
+        ci_provider="github-actions",
+        deploy_target="gcp-cloud-run",
+        azure_region="eastus",
+        gcp_region="us-central1",
+        gcp_project_id="my-cool-project",
+        coverage_threshold=80,
+        registry="gar",
+        db="postgres",
+        output_dir=Path(tempfile.mkdtemp(prefix="gc_test_")),
+        with_git=False,
+        with_readme=True,
+    )
+    defaults.update(overrides)
+    return ServiceGenerator(**defaults)
+
+
+def test_registry_hostname_expands_gar_to_regional_pkg_dev():
+    """`gar` -> `<region>-docker.pkg.dev`, not the literal `gar`."""
+    g = _gen()
+    assert g._registry_hostname() == "us-central1-docker.pkg.dev"
+
+
+def test_registry_hostname_gar_uses_configured_region():
+    """The expansion is region-specific; don't hardcode us-central1."""
+    g = _gen(gcp_region="europe-west4")
+    assert g._registry_hostname() == "europe-west4-docker.pkg.dev"
+
+
+def test_registry_hostname_passthrough_for_unknown_registry():
+    """Unknown registries pass through unchanged (private registries)."""
+    g = _gen(registry="registry.example.com:5000")
+    assert g._registry_hostname() == "registry.example.com:5000"
+
+
+def test_registry_hostname_keeps_ghcr_alias():
+    """Don't regress ghcr.io expansion while adding gar."""
+    g = _gen(registry="ghcr")
+    assert g._registry_hostname() == "ghcr.io"
+
+
+def test_image_name_for_gar_includes_gcp_project_id():
+    """GAR image refs are <region>-docker.pkg.dev/<project-id>/<name>.
+
+    Without the project segment, pushes land in the wrong namespace.
+    """
+    g = _gen()
+    assert g._render_image_name() == "us-central1-docker.pkg.dev/my-cool-project/gar-test-svc"
+
+
+def test_image_name_for_gar_lowercases_project_id():
+    """Docker image refs require lowercase; assert we lowercase the project."""
+    g = _gen(gcp_project_id="My-Mixed-Case-Project")
+    # We lowercase in the Jinja template via `| lower`, not in the generator.
+    # The generator passes the spec value through; the template is responsible
+    # for lowercasing before it lands in bash.
+    assert "My-Mixed-Case-Project" in g._render_image_name()
+
+
+def test_image_name_for_gar_falls_back_to_placeholder_when_project_missing():
+    """Missing gcp_project_id -> REPLACE_WITH_GCP_PROJECT_ID, not None."""
+    g = _gen(gcp_project_id=None)
+    name = g._render_image_name()
+    assert "REPLACE_WITH_GCP_PROJECT_ID" in name
+    assert "None" not in name
+
+
+def test_rendered_workflow_uses_gar_image_path_for_gar_registry():
+    """The full scaffold + render: ci.yml's IMAGE_NAME must include
+    `<region>-docker.pkg.dev/<project-id>/${REPO}`, not `gar/...`.
+
+    This is the regression test for the broken `gar` alias.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        out = _gen(output_dir=Path(td)).run()
+        ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        # Must NOT contain the literal 'gar/' hostname (which is what the
+        # scaffolder used to produce before this PR).
+        assert "IMAGE_NAME=gar/" not in ci_yml, (
+            "ci.yml still uses the literal `gar` registry alias — DNS will "
+            "fail at publish time. The scaffolder must expand `gar` to "
+            "`<region>-docker.pkg.dev`.\n\n"
+            f"Got:\n{ci_yml}"
+        )
+        # Must contain the regional GAR hostname with the project ID.
+        assert "us-central1-docker.pkg.dev/my-cool-project" in ci_yml, (
+            "Expected the GAR image path with the project ID baked in. "
+            f"Got:\n{ci_yml}"
+        )
+        # And the login step's `registry:` field must point at the GAR hostname.
+        assert "registry: us-central1-docker.pkg.dev" in ci_yml, (
+            "docker/login-action's `registry:` field is still pointing at the "
+            "wrong hostname. Expected `registry: us-central1-docker.pkg.dev`.\n\n"
+            f"Got:\n{ci_yml}"
+        )
+
+
+def test_rendered_workflow_keeps_ghcr_image_path():
+    """GHCR scaffolds must still use `ghcr.io/${OWNER}/${REPO}` after the fix.
+
+    The GAR fix must not regress the GHCR path.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        g = _gen(registry="ghcr", deploy_target="local", gcp_project_id=None)
+        out = g.run()
+        ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        assert "IMAGE_NAME=ghcr.io/${OWNER}/${REPO}" in ci_yml, (
+            f"Expected the legacy ghcr image path. Got:\n{ci_yml}"
+        )
+
+
+def test_rendered_workflow_trivy_pin_is_resolvable():
+    """`aquasecurity/trivy-action@0.20.0` (bare semver) is unresolvable on
+    GitHub Actions; the templates must pin to a `vX.Y.Z` release tag.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        out = _gen(output_dir=Path(td)).run()
+        ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        m = re.search(r"aquasecurity/trivy-action@([^\s'\"]+)", ci_yml)
+        assert m is not None, f"No trivy-action pin found in:\n{ci_yml}"
+        pin = m.group(1)
+        assert pin.startswith("v"), (
+            f"trivy-action pin `{pin}` is missing the `v` prefix; bare semver "
+            "tags aren't resolvable as Actions versions. Pin must match a "
+            "published release tag (e.g. `v0.36.0`)."
+        )
