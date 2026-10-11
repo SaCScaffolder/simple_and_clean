@@ -64,29 +64,17 @@ class DetectStrategyTests(unittest.TestCase):
             sac_base_commit=None,
         )
 
-    def test_path_mismatch_when_internal_differs_from_dirname(self):
-        """The integration test case: the source repo is named
-        `sac_example_ala_service_modified` (snake_cased from
-        `sac_example_ala_service_modified` would be
-        `sac_example_ala_service_modified`), but the developer
-        commit's `internal/<X>/` uses `ala_service_modified`. The
-        scaffold regenerated under the dir name (because the config
-        has no `service_name`), so the developer's path doesn't
-        match. Strategy: PATH_MISMATCH."""
+    def test_path_mismatch_when_internal_in_conflict(self):
+        """Any `internal/<X>/` path in the conflict list triggers
+        PATH_MISMATCH. The actual comparison between the scaffold's
+        path and the developer's path is done in the resolve step,
+        not here. This is the bare-path form of the conflict (what
+        `_parse_conflicting_files` would extract if `git cherry-pick`
+        reported the developer's path directly). See
+        `test_path_mismatch_from_actual_git_cherry_pick_output` for
+        the suggestion-line form (the actual output we see in the
+        integration test)."""
         config = self._config(service_name="")
-        files = [
-            "cmd/server/main.go",
-            "internal/sac_example_ala_service_modified/middleware.go",
-        ]
-        # Wait -- that's the NEW path, not the developer's. The conflict
-        # is on the developer's path, which is the OLD one. Let me
-        # think about what the conflict list actually contains.
-        # The git cherry-pick error reports the files that couldn't
-        # be applied. For a renamed-directory case, it shows the
-        # DEVELOPER's path (because that's what the patch references)
-        # and a hint that the file was renamed in HEAD. The "did you
-        # mean to move it" suggestion shows the NEW path.
-        # So the conflict list has the developer's path:
         files = [
             "cmd/server/main.go",
             "internal/ala_service_modified/middleware.go",
@@ -95,24 +83,52 @@ class DetectStrategyTests(unittest.TestCase):
         strategy = detect_strategy(files, config, source_repo_name="sac_example_ala_service_modified")
         self.assertEqual(strategy, "PATH_MISMATCH")
 
+    def test_path_mismatch_from_actual_git_cherry_pick_output(self):
+        """Regression test for the failure surfaced in run 38118204340
+        on 2026-10-11T07:22Z. The `conflicting_files` list from
+        `git cherry-pick` doesn't always contain bare `internal/<X>/`
+        paths; it often contains git's "did you mean to move it?"
+        suggestion lines and parser artifacts. The strategy detector
+        must extract the package dir from those suggestion lines.
+
+        Verbatim conflict list from the run (truncated to the
+        relevant entries):"""
+        config = self._config(service_name="")
+        files = [
+            "cmd/server/main.go",
+            (
+                "5823af3 (feat: add CORS middleware, wire through cmd/server/main.go) "
+                "inside a directory that was renamed in HEAD, suggesting it should "
+                "perhaps be moved to internal/sac_example_ala_service_modified/middleware.go."
+            ),
+            (
+                "5823af3 (feat: add CORS middleware, wire through cmd/server/main.go) "
+                "inside a directory that was renamed in HEAD, suggesting it should "
+                "perhaps be moved to internal/sac_example_ala_service_modified/middleware_test.go."
+            ),
+            "s, mark the corrected paths",
+        ]
+        strategy = detect_strategy(files, config, source_repo_name="sac_example_ala_service_modified")
+        self.assertEqual(strategy, "PATH_MISMATCH")
+
     def test_no_mismatch_when_internal_matches_service_name(self):
-        """The developer's path matches the config's service_name
-        (snake-cased). No path mismatch. The conflict must be
-        something else (e.g. content), and we have no strategy for
-        that yet."""
+        """The conflict only involves `cmd/server/main.go` (a content
+        conflict on a top-level file), not any `internal/<X>/` path.
+        No path-mismatch strategy applies."""
         from servicectl.sac_config import SacConfig
         config = SacConfig(service_name="ala_service_modified")
-        files = ["internal/ala_service_modified/handler.go"]
+        files = ["cmd/server/main.go"]
         strategy = detect_strategy(files, config, source_repo_name="ala_service_modified")
         self.assertIsNone(strategy)
 
     def test_no_mismatch_when_internal_matches_dirname(self):
-        """Legacy config (no `service_name` field); the scaffolder
-        falls back to the dir name. The developer's path matches
-        the dir name (which is what the scaffolder regenerated
-        under). No path mismatch."""
+        """Same as above: the conflict is on a top-level file (no
+        `internal/<X>/` path involved), so no path-mismatch
+        strategy applies. The presence of an `internal/<X>/` in the
+        conflict list is the trigger; its content is irrelevant to
+        the strategy decision."""
         config = self._config(service_name="")
-        files = ["internal/sac_example_ala_service_modified/handler.go"]
+        files = ["cmd/server/main.go", "Dockerfile"]
         strategy = detect_strategy(files, config, source_repo_name="sac_example_ala_service_modified")
         self.assertIsNone(strategy)
 
@@ -177,7 +193,12 @@ class ResolvePathMismatchTests(unittest.TestCase):
             "internal/ala_service_modified/middleware_test.go",
         ]
 
-        with mock.patch("subprocess.run") as mock_run:
+        # Mock _infer_package_from_source so we don't depend on the
+        # mocked subprocess.run returning realistic git output. The
+        # unit under test is `resolve_conflict`, not the source
+        # inspection; the latter is covered by other tests.
+        with mock.patch("servicectl.resolve._infer_package_from_source", return_value="ala_service_modified"), \
+             mock.patch("subprocess.run") as mock_run:
             # First call: `git push -u origin <branch>` -> success.
             # Second call: `gh pr create ...` -> returns the PR URL.
             # All other subprocess.run calls in the test (git checkout,

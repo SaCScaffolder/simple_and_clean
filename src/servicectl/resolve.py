@@ -89,6 +89,51 @@ from .sac_config import CONFIG_FILENAME, SacConfig, read_config, write_config
 _INTERNAL_PATH_RE = re.compile(r"^internal/([^/]+)/")
 
 
+# Match the "moved to <path>" segment of git's "did you mean to move it?"
+# suggestion. This appears in the `conflicting_files` list when git
+# detects a rename but can't auto-apply. The suggestion looks like:
+#   "5823af3 (feat: ...) inside a directory that was renamed in HEAD,
+#    suggesting it should perhaps be moved to internal/<X>/middleware.go."
+# We extract the path after "moved to " and parse the package dir from
+# it. The trailing `.` is a sentence terminator; strip it.
+_MOVED_TO_PATH_RE = re.compile(r"moved to (internal/[^/]+/[^\s.][^\s]*)")
+
+
+def _extract_package_dirs(conflicting_files: list[str]) -> list[str]:
+    """Extract all candidate package directories from a list of
+    `conflicting_files` entries.
+
+    The list comes from `git cherry-pick` output and is heterogeneous:
+      - bare paths: `cmd/server/main.go`, `internal/<X>/handler.go`
+      - git's "did you mean to move it?" suggestion lines
+      - fragments of git's "use git add ... to mark" hint
+
+    We only care about `internal/<X>/` paths. The bare-path form
+    uses `_INTERNAL_PATH_RE`; the suggestion form uses
+    `_MOVED_TO_PATH_RE`. Both go into the same bucket.
+
+    Returns a list of package directory names (the `<X>` parts), in
+    the order they appear in the conflict list. Duplicates are not
+    deduplicated -- the caller decides what to do with multiple
+    candidates.
+    """
+    out: list[str] = []
+    for f in conflicting_files:
+        m = _INTERNAL_PATH_RE.match(f)
+        if m:
+            out.append(m.group(1))
+            continue
+        m = _MOVED_TO_PATH_RE.search(f)
+        if m:
+            # `m.group(1)` is the full path like `internal/<X>/middleware.go`.
+            # Extract the `<X>` part.
+            full_path = m.group(1)
+            parts = full_path.split("/")
+            if len(parts) >= 2 and parts[0] == "internal":
+                out.append(parts[1])
+    return out
+
+
 @dataclass
 class ResolutionResult:
     """Outcome of a `resolve_conflict()` call.
@@ -117,30 +162,44 @@ def detect_strategy(conflicting_files: list[str], config: SacConfig, source_repo
     """Return the resolution strategy to apply, or None if no strategy
     matches this conflict.
 
-    `source_repo_name` is the basename of the source repo (e.g.
-    "sac_example_ala_service_modified"). The PATH_MISMATCH strategy
-    uses it to compare against the developer commit's `internal/<X>/`
-    path: if `<X>` is something other than the snake_case of
-    `source_repo_name`, the scaffolder regenerated under the wrong
-    name.
+    This function only inspects the conflict list (which contains
+    the scaffold's paths and git's suggestions). It does NOT read
+    the source repo's existing `internal/<X>/` directory -- that
+    is the resolve step's job, since the comparison needs both
+    sides.
 
     Detection order (first match wins; future strategies go below):
 
-      1. PATH_MISMATCH: any conflict file matches `internal/<X>/`
-         where `<X>` is not a snake-case form of the source repo's
-         basename OR is not the config's `service_name` (when set).
+      1. PATH_MISMATCH: any conflict file references `internal/<X>/`
+         (either as a bare path or in a git "moved to ..."
+         suggestion). The mere presence of an `internal/<X>/` path
+         in the conflict list indicates a path-related conflict
+         (the developer's path and the scaffold's path disagree,
+         even if we don't know the developer's path yet). The
+         resolve step does the actual comparison and writes
+         `service_name` to the config.
+
+         If the conflict list has only `cmd/server/main.go` (or
+         other top-level files), it's a content conflict with no
+         available strategy.
+
+    Why this is "any internal path" rather than "mismatched paths":
+    the conflict list from `git cherry-pick` is heterogeneous.
+    Bare paths give us the developer's original path; suggestion
+    lines give us the scaffold's regenerated path. Comparing them
+    directly is fragile (different entries may use different
+    forms, and the suggestion's path is the scaffold's, not the
+    developer's). The simpler rule is: if any conflict involves
+    `internal/<X>/`, assume path mismatch. The resolve step then
+    derives the developer's intended name from the source repo's
+    existing directory and writes it to `config.service_name`.
+    If the scaffold's path and the developer's path actually
+    agree, the resolve step's write is a no-op (same name) and
+    the conflict goes away on the next refresh.
     """
-    for f in conflicting_files:
-        m = _INTERNAL_PATH_RE.match(f)
-        if m:
-            package_dir = m.group(1)
-            # The scaffold regenerated under the source repo's basename
-            # (when service_name is empty) or under service_name (when
-            # set). If the developer's path uses a different name, it's
-            # a path mismatch.
-            expected = config.service_name or _snake_case(source_repo_name)
-            if package_dir != expected:
-                return "PATH_MISMATCH"
+    candidates = _extract_package_dirs(conflicting_files)
+    if candidates:
+        return "PATH_MISMATCH"
     return None
 
 
@@ -196,23 +255,13 @@ def _resolve_path_mismatch(
     set to a different value. Setting it to `<X>` makes the next
     refresh use the right name and the cherry-pick applies cleanly.
     """
-    # Extract the package directory from the first matching conflict file.
-    # The list can have multiple `internal/<X>/` entries (e.g. the
-    # middleware.go + middleware_test.go pair from the CORS commit);
-    # we use the first one. If they disagree, we fall back to the
-    # source repo's existing `internal/<X>/` directory on the main
-    # branch (which is the bootstrap's original name).
-    package_dir: str | None = None
-    for f in conflicting_files:
-        m = _INTERNAL_PATH_RE.match(f)
-        if m:
-            package_dir = m.group(1)
-            break
-    if package_dir is None:
-        # detect_strategy should have already returned PATH_MISMATCH
-        # for at least one path; if we get here, something is off.
-        # Fall back to reading the existing scaffold's internal dir.
-        package_dir = _infer_package_from_source(source_repo)
+    # Determine the developer's intended package dir. The conflict
+    # list from `git cherry-pick` gives us the *scaffold's* package
+    # dir (via the "moved to" suggestion), not the developer's. The
+    # developer's intended dir is the source repo's existing
+    # `internal/<X>/` directory on its main branch -- the bootstrap
+    # commit's choice. We read it from the source repo directly.
+    package_dir = _infer_package_from_source(source_repo)
 
     # Update the in-memory config and write it back. We don't bail if
     # `config.service_name` is already set to `package_dir` -- that's
