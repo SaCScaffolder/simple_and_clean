@@ -70,6 +70,12 @@ jobs:
           # into the spec at scaffold time instead. Lowercased to satisfy
           # Docker's image-ref requirements.
           echo "IMAGE_NAME={{ registry_hostname }}/{{ gcp_project_id | lower }}/${REPO}" >> "$GITHUB_ENV"
+{% elif registry == 'ghcr' %}
+          # GHCR *repo-package* format is `ghcr.io/<owner>/<repo>/<image>`.
+          # Without the trailing `/${SERVICE}` segment, the image lands in
+          # the *user/org* package namespace, which GITHUB_TOKEN cannot
+          # write to. See PR #101.
+          echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/${REPO}/{{ service_name }}" >> "$GITHUB_ENV"
 {% else %}
           echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/${REPO}" >> "$GITHUB_ENV"
 {% endif %}
@@ -117,6 +123,12 @@ jobs:
           # into the spec at scaffold time instead. Lowercased to satisfy
           # Docker's image-ref requirements.
           echo "IMAGE_NAME={{ registry_hostname }}/{{ gcp_project_id | lower }}/${REPO}" >> "$GITHUB_ENV"
+{% elif registry == 'ghcr' %}
+          # GHCR *repo-package* format is `ghcr.io/<owner>/<repo>/<image>`.
+          # Without the trailing `/${SERVICE}` segment, the image lands in
+          # the *user/org* package namespace, which GITHUB_TOKEN cannot
+          # write to. See PR #101.
+          echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/${REPO}/{{ service_name }}" >> "$GITHUB_ENV"
 {% else %}
           echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/${REPO}" >> "$GITHUB_ENV"
 {% endif %}

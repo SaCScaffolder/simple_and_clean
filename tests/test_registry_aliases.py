@@ -132,16 +132,32 @@ def test_rendered_workflow_uses_gar_image_path_for_gar_registry():
 
 
 def test_rendered_workflow_keeps_ghcr_image_path():
-    """GHCR scaffolds must still use `ghcr.io/${OWNER}/${REPO}` after the fix.
-
-    The GAR fix must not regress the GHCR path.
+    """GHCR scaffolds must render the repo-package image path
+    `ghcr.io/<owner>/<repo>/<image>` (three path segments), not the
+    two-segment user/org-package form. GITHUB_TOKEN has Packages:write
+    for the *repo* namespace but not the *org* namespace.
     """
     with tempfile.TemporaryDirectory() as td:
         g = _gen(registry="ghcr", deploy_target="local", gcp_project_id=None)
         out = g.run()
         ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        assert "IMAGE_NAME=ghcr.io/${OWNER}/${REPO}" in ci_yml, (
-            f"Expected the legacy ghcr image path. Got:\n{ci_yml}"
+        # New path: includes the service name as a path segment.
+        assert "IMAGE_NAME=ghcr.io/${OWNER}/${REPO}/gar-test-svc" in ci_yml, (
+            f"Expected the repo-package GHCR image path with the service name. "
+            f"Got:\n{ci_yml}"
+        )
+        # The two-segment org-package form (which fails with
+        # `permission_denied: write_package`) must NOT appear. We check
+        # for the bash line ending (`"`) right after `${REPO}` to be
+        # sure the path doesn't terminate there.
+        assert not re.search(
+            r'IMAGE_NAME=ghcr\.io/\$\{OWNER\}/\$\{REPO\}"',
+            ci_yml,
+        ), (
+            "ci.yml still renders the two-segment org-package GHCR image "
+            "path. GITHUB_TOKEN cannot write to the org namespace; the "
+            "image must be a repo-package (three segments). See PR #101."
+            f"\n\nGot:\n{ci_yml}"
         )
 
 
