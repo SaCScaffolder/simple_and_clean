@@ -59,6 +59,7 @@ jobs:
           owner: SaCScaffolder
 
       - name: POST repository_dispatch to sac
+        id: dispatch
         env:
           TOKEN: ${{ steps.app-token.outputs.token }}
           SHA: ${{ github.sha }}
@@ -66,6 +67,10 @@ jobs:
           REPO: ${{ github.repository }}
           ACTOR: ${{ github.actor }}
         run: |
+          # Record the dispatch wall-clock time so the find-run step can
+          # filter to runs newer than (now - 60s). The recency filter
+          # avoids matching an old failed run from a previous dispatch.
+          echo "dispatch_time_ms=$(date +%s%3N)" >> "$GITHUB_OUTPUT"
           # Build the client_payload inline so we can use bash here-doc
           # safely without quoting issues in the JSON.
           payload=$(cat <<EOF
@@ -109,30 +114,50 @@ jobs:
         id: find-run
         env:
           TOKEN: ${{ steps.app-token.outputs.token }}
+          # We dispatched the repository_dispatch in the previous step;
+          # the resulting workflow runs land within a couple of seconds.
+          # An older failed run with the same `display_title` could be
+          # the first match if we don't filter on recency. We compute
+          # the cutoff as (dispatch_time - 60s) so we only consider
+          # runs that appeared after our dispatch. Computed in the
+          # run: block below because ${{ }} expressions can't do
+          # arithmetic on step outputs.
         run: |
+          # Compute cutoff as dispatch_time (in ms) minus 60s, in seconds.
+          DISPATCH_MS=${{ steps.dispatch.outputs.dispatch_time_ms }}
+          export CUTOFF_EPOCH=$(( (DISPATCH_MS - 60000) / 1000 ))
+          echo "Cutoff epoch seconds: ${CUTOFF_EPOCH}"
           # Poll the sac repo's recent repository_dispatch runs until we
-          # find one whose display_title matches our event_type. The
-          # `head_sha` on a repository_dispatch run is the commit the
-          # sac workflow checked out (i.e. sac's own main), NOT the SHA
-          # we dispatched with -- so we filter on display_title instead.
+          # find one whose display_title matches our event_type AND
+          # whose created_at is newer than our dispatch's cutoff. The
+          # `head_sha` on a repository_dispatch run is the commit sac
+          # checked out (i.e. sac's own main), NOT the SHA we dispatched
+          # with -- so we filter on display_title + recency instead.
           # We also use `event=repository_dispatch` so unrelated runs
           # (push-triggered integration tests) don't match.
+          #
+          # Why the cutoff: the dispatch itself returns HTTP 204 in
+          # ~1s, but the resulting workflow runs are not in the API
+          # yet when we start polling. Without the recency filter, the
+          # first poll can match an *old* run from a previous dispatch
+          # and `gh run watch` it -- reporting the old failure as if
+          # it were our new one.
           for i in $(seq 1 30); do
             RUN_ID=$(curl -sS \
               -H "Authorization: Bearer ${TOKEN}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/SaCScaffolder/sac/actions/runs?event=repository_dispatch&per_page=10" \
               | python -c "
-          import json, sys
+          import json, sys, os, datetime
           runs = json.load(sys.stdin).get('workflow_runs', [])
-          # Newest first; the first run whose workflow file is
-          # integration-test-unmodified.yml and display_title matches
-          # our event_type is the one we just dispatched.
+          cutoff = datetime.datetime.fromtimestamp(int(os.environ['CUTOFF_EPOCH']), tz=datetime.timezone.utc)
           for r in runs:
               wf_path = r.get('path', '')
               title = r.get('display_title', '')
+              created = datetime.datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))
               if 'integration-test-unmodified' in wf_path \
-                 and title == 'simple_and_clean-updated':
+                 and title == 'simple_and_clean-updated' \
+                 and created >= cutoff:
                   print(r['id'])
                   break
           ")
