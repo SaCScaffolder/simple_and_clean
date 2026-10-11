@@ -43,6 +43,7 @@ class SacConfigDataclassTests(unittest.TestCase):
 
     def test_from_generator_factory(self):
         c = SacConfig.from_generator(
+            name="billing-api",
             template="node-react-web",
             ci_provider="azure-devops",
             deploy_target="gcp-cloud-run",
@@ -54,6 +55,7 @@ class SacConfigDataclassTests(unittest.TestCase):
             db="cosmosdb",
             sac_version="0.1.0",
         )
+        self.assertEqual(c.service_name, "billing-api")
         self.assertEqual(c.template, "node-react-web")
         self.assertEqual(c.deploy_target, "gcp-cloud-run")
         self.assertEqual(c.gcp_project_id, "my-gcp-proj")
@@ -65,6 +67,7 @@ class SacConfigDataclassTests(unittest.TestCase):
     def test_round_trip_via_dict(self):
         """from_dict(to_dict()) yields an equivalent config (excluding bookkeeping)."""
         original = SacConfig(
+            service_name="billing-api",
             template="dotnet-webapi",
             ci_provider="github-actions",
             deploy_target="azure",
@@ -76,6 +79,7 @@ class SacConfigDataclassTests(unittest.TestCase):
         )
         d = original.to_dict()
         restored = SacConfig.from_dict(d)
+        self.assertEqual(restored.service_name, original.service_name)
         self.assertEqual(restored.template, original.template)
         self.assertEqual(restored.deploy_target, original.deploy_target)
         self.assertEqual(restored.azure_region, original.azure_region)
@@ -99,13 +103,19 @@ class SacConfigFileIoTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_write_then_read_round_trip(self):
-        c = SacConfig(template="go-webapi", deploy_target="azure", coverage_threshold=85)
+        c = SacConfig(
+            service_name="billing-api",
+            template="go-webapi",
+            deploy_target="azure",
+            coverage_threshold=85,
+        )
         path = write_config(self.dir, c)
         self.assertEqual(path.name, CONFIG_FILENAME)
         self.assertTrue(path.exists())
         # File content is sorted JSON.
         text = path.read_text()
         loaded = json.loads(text)
+        self.assertEqual(loaded["service_name"], "billing-api")
         self.assertEqual(loaded["template"], "go-webapi")
         self.assertEqual(loaded["coverage_threshold"], 85)
         # Sort by key so diffs stay stable across versions.
@@ -116,12 +126,49 @@ class SacConfigFileIoTests(unittest.TestCase):
         self.assertIn("sac_version", loaded)
 
     def test_write_then_read_back_is_equal(self):
-        c = SacConfig(template="dotnet-webapi", deploy_target="azure", coverage_threshold=92)
+        c = SacConfig(
+            service_name="billing-api",
+            template="dotnet-webapi",
+            deploy_target="azure",
+            coverage_threshold=92,
+        )
         write_config(self.dir, c)
         restored = read_config(self.dir)
+        self.assertEqual(restored.service_name, c.service_name)
         self.assertEqual(restored.template, c.template)
         self.assertEqual(restored.deploy_target, c.deploy_target)
         self.assertEqual(restored.coverage_threshold, c.coverage_threshold)
+
+    def test_read_legacy_config_without_service_name(self):
+        """A `.servicectl.json` written before this field existed has
+        no `service_name` key. `read_config` must NOT raise; it
+        returns a SacConfig with `service_name=""`, which signals to
+        the caller (refresh) to fall back to the directory name.
+        Regression target: if from_dict() ever becomes strict about
+        required keys, refresh will break for every pre-fix scaffolded
+        repo. This pins the lenient-parse contract."""
+        legacy = {
+            "schema_version": 1,
+            "template": "go-webapi",
+            "ci_provider": "github-actions",
+            "deploy_target": "local",
+            "azure_region": "eastus",
+            "gcp_region": "us-central1",
+            "gcp_project_id": None,
+            "coverage_threshold": 80,
+            "registry": "ghcr",
+            "db": "postgres",
+            "sac_version": "0.1.0",
+            "sac_base_commit": None,
+            # NOTE: no `service_name` key. This is the pre-fix shape.
+        }
+        (self.dir / CONFIG_FILENAME).write_text(json.dumps(legacy))
+        restored = read_config(self.dir)
+        self.assertEqual(restored.service_name, "")
+        self.assertEqual(restored.template, "go-webapi")
+        # Other fields are still populated correctly.
+        self.assertEqual(restored.deploy_target, "local")
+        self.assertEqual(restored.coverage_threshold, 80)
 
     def test_read_missing_file_raises(self):
         with self.assertRaises(FileNotFoundError):
@@ -219,6 +266,7 @@ class FromV2DictTests(unittest.TestCase):
             "template": "go-webapi",
         }
         cfg = SacConfig.from_v2_dict(v2)
+        self.assertEqual(cfg.service_name, "billing-api")
         self.assertEqual(cfg.template, "go-webapi")
         # v1 defaults for everything else
         self.assertEqual(cfg.ci_provider, "github-actions")

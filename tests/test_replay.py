@@ -59,13 +59,21 @@ def _init_repo(tmp: Path, name: str = "r") -> Path:
     return repo
 
 
-def _write_sac_config(repo: Path, template: str = "python-flask", deploy_target: str = "local") -> None:
+def _write_sac_config(
+    repo: Path,
+    template: str = "python-flask",
+    deploy_target: str = "local",
+    service_name: str = "",
+) -> None:
     """Write a minimal `.servicectl.json` so refresh() can read the scaffold inputs.
 
     Tests that need refresh() to find a config call this helper; tests that
-    intentionally exercise the missing-config path skip it.
+    intentionally exercise the missing-config path skip it. `service_name`
+    defaults to empty so existing tests get the pre-fix shape (no
+    `service_name` field); tests that want to exercise the new behavior
+    pass an explicit name.
     """
-    config = SacConfig(template=template, deploy_target=deploy_target)
+    config = SacConfig(service_name=service_name, template=template, deploy_target=deploy_target)
     write_config(repo, config)
 
 
@@ -181,6 +189,47 @@ class RefreshDryRunTests(unittest.TestCase):
 
         with self.assertRaises(RefreshConfigMissing):
             refresh(self.repo, dry_run=True)
+
+    def test_dry_run_exposes_service_name_from_config(self):
+        """The dry-run plan reads `service_name` from `.servicectl.json`.
+        The integration test's refresh path uses this value (not the
+        source repo's directory name) when regenerating the scaffold.
+
+        Regression target: the dry-run display used to be silent about
+        which name would be used. After this fix, the `service:` line
+        of the dry-run plan surfaces the resolved name, so a wrong
+        config (e.g. a pre-fix one with no `service_name`) is visible
+        at a glance."""
+        t = SacTrailers(operation="scaffold", version="0.1.0")
+        subject, trailers = commit_message_with_trailers("Initial scaffold", t)
+        _commit(self.repo, [subject, trailers], file_content="scaffold\n")
+        _commit(self.repo, ["user feature"], file_content="user\n")
+        # The service name in the config is intentionally different
+        # from the directory name (`r` is the default from _init_repo)
+        # to mirror the integration test's setup where the runner
+        # clones to `${REPO_NAME}` but the spec is named without the
+        # `sac_example_` prefix.
+        _write_sac_config(self.repo, service_name="original-name")
+
+        run = refresh(self.repo, dry_run=True)
+        self.assertIsNotNone(run.config)
+        self.assertEqual(run.config.service_name, "original-name")
+
+    def test_dry_run_service_name_empty_for_legacy_config(self):
+        """A `.servicectl.json` written before this field existed has
+        no `service_name` key. The dry-run surfaces the empty value so
+        the caller (refresh) knows to fall back to the directory name.
+        """
+        t = SacTrailers(operation="scaffold", version="0.1.0")
+        subject, trailers = commit_message_with_trailers("Initial scaffold", t)
+        _commit(self.repo, [subject, trailers], file_content="scaffold\n")
+        _commit(self.repo, ["user feature"], file_content="user\n")
+        # Legacy config: no service_name field.
+        _write_sac_config(self.repo)
+
+        run = refresh(self.repo, dry_run=True)
+        self.assertIsNotNone(run.config)
+        self.assertEqual(run.config.service_name, "")
 
 
 # --- refresh() live ---

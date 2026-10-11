@@ -1,0 +1,91 @@
+fix(scaffolder): store service_name in .servicectl.json for refresh
+
+`servicectl refresh` derives the service name from
+`source_repo.resolve().name` (the local directory's name), not from the
+service's package name. When the local dir name differs from the name
+the original `init` used -- which is exactly what the integration
+test does (it clones `SaCScaffolder/sac_example_ala_service_modified`
+to a runner dir whose basename is `sac_example_ala_service_modified`,
+while the spec is named `ala_service_modified`) -- the regenerated
+scaffold puts files at `internal/<dir_name>/` and the developer
+commits in the fixture, which were made against `internal/<spec_name>/`,
+fail to cherry-pick with `RefreshConflict`.
+
+The module docstring at the top of `src/servicectl/sac_config.py` has
+documented `"service_name": "billing-api"` as part of the
+`.servicectl.json` format since the file was first written, but the
+`SacConfig` dataclass never actually stored the field. This commit
+makes the implementation match the documented format:
+
+  - `SacConfig` gains a `service_name: str = ""` field. The empty
+    default makes the round-trip lenient: configs written before this
+    field existed (which `from_dict` already silently drops unknown
+    keys from) read back with `service_name=""`, signalling to the
+    caller that they should fall back to the dir name. No repo breaks.
+
+  - `from_generator()` now takes `name=...` and stores it. The
+    `ServiceGenerator.run()` call site passes `name=self.name`, so
+    every fresh `init` writes the field to `.servicectl.json`.
+
+  - `to_generator_kwargs()` renames `service_name` to `name` for the
+    `ServiceGenerator` constructor (which expects `name`, not
+    `service_name`).
+
+  - `from_v2_dict()` maps the v2 spec's nested `service.name` to
+    `service_name`. The previous code mapped to `name`, which
+    `from_dict` then silently dropped -- the v2 spec's service name
+    was effectively discarded on every v2 init.
+
+  - `replay.py:_regenerate_scaffold` pops `name` from the config-derived
+    kwargs before forwarding them to `ServiceGenerator`. Without this
+    pop, the explicit `name=source_name` parameter and the
+    `**config.to_generator_kwargs()` expansion collide with
+    "got multiple values for keyword argument 'name'".
+
+  - The refresh path resolves the scaffold name as
+    `config.service_name or source_repo.resolve().name`. New configs
+    use the field; legacy configs use the dir name (the same broken
+    behavior as before, but only for repos that haven't been
+    rescaffolded since this commit -- which is most existing repos,
+    handled by the one-time migration in `SaCScaffolder/sac`).
+
+  - The dry-run plan panel in `cli.py` now shows a `service: <name>`
+    line at the top of the config block. Empty `service_name` (legacy
+    config) shows as `<not set; will fall back to dir name>` so a
+    misconfigured config is visible at a glance.
+
+Tests (8 new, 213/213 passing, 83.53% coverage, above the 80% gate):
+
+  - `test_sac_config.py`:
+    * `test_from_generator_factory` -- accepts and stores `name=`
+    * `test_round_trip_via_dict` -- preserves `service_name`
+    * `test_minimal_v2_spec` -- v2 `service.name` maps to `service_name`
+    * `test_write_then_read_round_trip` -- file round-trips the field
+    * `test_write_then_read_back_is_equal` -- dataclass equality
+    * `test_read_legacy_config_without_service_name` -- graceful
+      migration for pre-fix configs (regression target: never make
+      `from_dict` strict about required keys)
+
+  - `test_replay_fast.py`:
+    * `test_service_name_in_config_does_not_collide_with_source_name`
+      -- regression test for the "got multiple values for name"
+      TypeError. Would have caught the bug at unit-test time.
+    * `test_refresh_uses_config_service_name_over_dirname` -- the
+      caller (refresh) resolves the name correctly
+
+  - `test_replay.py`:
+    * `test_dry_run_exposes_service_name_from_config` -- dry-run
+      surfaces the config field
+    * `test_dry_run_service_name_empty_for_legacy_config` -- empty
+      string for legacy configs
+
+Bug surfaced in run 38115013465 (2026-10-11T05:31:03Z) on
+`SaCScaffolder/sac`, head `10b5536`, workflow
+`Integration test -- modified example`. The integration test's
+"Refresh -- Regenerate and replay" step hit `RefreshConflict` on
+`cmd/server/main.go`; the underlying cause was the path mismatch
+between the regenerated scaffold's `internal/sac_example_ala_service_modified/`
+and the developer commit's `internal/ala_service_modified/middleware.go`.
+
+Refs: SaCScaffolder/sac#23
+Co-authored-by: henryorsborn <henryorsborn@users.noreply.github.com>
