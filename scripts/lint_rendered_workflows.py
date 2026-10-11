@@ -7,6 +7,7 @@ scaffolder uses, then load the rendered output as YAML.
 
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -72,8 +73,10 @@ def main() -> int:
             if expected_substring not in ci_yml:
                 failed.append((template, registry, f"missing {expected_substring!r}"))
 
-            # 3. registry: field
-            if f"registry: {expected_registry}" not in ci_yml:
+            # 3. registry: field (only check if the publish job exists; for
+            # GAR scaffolds the publish job is intentionally omitted, so the
+            # `registry:` field lives in deploy.yml.j2 instead).
+            if registry != "gar" and f"registry: {expected_registry}" not in ci_yml:
                 failed.append((template, registry, f"missing `registry: {expected_registry}`"))
 
             # 4. trivy pin must be vX.Y.Z (resolvable), not bare semver
@@ -86,6 +89,15 @@ def main() -> int:
             # 5. No literal `gar/` hostname anywhere
             if "IMAGE_NAME=gar/" in ci_yml:
                 failed.append((template, registry, "ci.yml still contains literal `gar/` hostname"))
+
+            # 6. GAR scaffolds must NOT render a publish: job (GITHUB_TOKEN
+            # can't push to GAR; the GAR-aware path is in deploy.yml.j2).
+            # GHCR scaffolds must still have it.
+            has_publish_job = bool(re.search(r"^  publish:", ci_yml, re.MULTILINE))
+            if registry == "gar" and has_publish_job:
+                failed.append((template, registry, "ci.yml still has a `publish:` job for GAR; this would always fail with permission_denied"))
+            if registry != "gar" and not has_publish_job:
+                failed.append((template, registry, "ci.yml is missing the `publish:` job for non-GAR registries"))
 
             print(f"  PASS {template:14s} registry={registry:8s}")
 
