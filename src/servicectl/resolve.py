@@ -379,8 +379,12 @@ def _resolve_path_mismatch(
             err_msg,
         )
 
-    # Open a PR. Use `gh pr create` (it reads the GH_TOKEN from the
-    # env). The PR body explains the conflict and the resolution.
+    # Open a PR. We use the GitHub REST API directly instead of
+    # `gh pr create` because the latter makes a GraphQL query for
+    # `repository.pullRequests` to check for existing PRs, and the
+    # GitHub App's installation token doesn't have the
+    # `pull_requests:read` scope. Direct REST avoids the GraphQL
+    # pre-flight and works with just `contents:write`.
     pr_body = (
         f"## Refresh conflict resolution\n\n"
         f"`servicectl refresh` against this repo hit a `RefreshConflict` "
@@ -405,20 +409,19 @@ def _resolve_path_mismatch(
         f"will automatically re-trigger and re-run the refresh. The PR's CI "
         f"check is set up to wait for this PR to merge before proceeding.\n"
     )
-
+    owner, repo_name = _github_owner_repo_from_remote(remote_url)
     pr_create = subprocess.run(
         [
             "gh",
-            "pr",
-            "create",
-            "--base",
-            "main",
-            "--head",
-            branch_name,
-            "--title",
-            f"chore(sac): resolve refresh conflict (run {run_id})",
-            "--body",
-            pr_body,
+            "api",
+            "--method", "POST",
+            "-H", "Accept: application/vnd.github+json",
+            f"/repos/{owner}/{repo_name}/pulls",
+            "-f", f"title=chore(sac): resolve refresh conflict (run {run_id})",
+            "-f", f"body={pr_body}",
+            "-f", f"head={branch_name}",
+            "-f", "base=main",
+            "-f", "maintainer_can_modify=false",
         ],
         capture_output=True,
         text=True,
@@ -430,7 +433,18 @@ def _resolve_path_mismatch(
             pr_create.stdout,
             pr_create.stderr,
         )
-    pr_url = pr_create.stdout.strip()
+    # REST API returns JSON; pull the `html_url` field.
+    try:
+        pr_json = json.loads(pr_create.stdout)
+        pr_url = pr_json.get("html_url", "").strip()
+    except (ValueError, KeyError) as e:
+        raise RuntimeError(
+            f"could not parse PR URL from REST response: {pr_create.stdout!r}"
+        ) from e
+    if not pr_url:
+        raise RuntimeError(
+            f"PR created but no html_url in response: {pr_create.stdout!r}"
+        )
 
     return ResolutionResult(
         strategy="PATH_MISMATCH",
@@ -496,6 +510,31 @@ def _snake_case(name: str) -> str:
     # "_foo_bar").
     s = re.sub(r"(?<!^)(?=[A-Z])", "_", s).lower()
     return s
+
+
+def _github_owner_repo_from_remote(remote_url: str) -> tuple[str, str]:
+    """Parse a `https://github.com/owner/repo[.git]` URL into (owner, repo).
+
+    Used to construct REST API paths for opening the resolution PR
+    via `gh api` instead of `gh pr create` (the latter uses GraphQL
+    and the App's installation token doesn't have
+    `pull_requests:read`).
+    """
+    if not remote_url.startswith("https://github.com/"):
+        raise RuntimeError(
+            f"remote URL is not a GitHub URL: {remote_url!r}. "
+            f"Only https://github.com/ remotes are supported."
+        )
+    path = remote_url[len("https://github.com/"):]
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = path.split("/")
+    if len(parts) != 2:
+        raise RuntimeError(
+            f"could not parse owner/repo from remote URL: {remote_url!r}. "
+            f"Expected 'https://github.com/<owner>/<repo>[.git]'."
+        )
+    return parts[0], parts[1]
 
 
 def _git(repo: Path, *args: str) -> None:

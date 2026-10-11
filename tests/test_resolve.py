@@ -206,16 +206,26 @@ class ResolvePathMismatchTests(unittest.TestCase):
             # through to the real git (via setUp), but to keep the
             # test simple and self-contained, we mock them too.
             #
-            # Set up: git push returns success, gh pr create returns
-            # a URL.
+            # Set up: git push returns success, gh api (used to open
+            # the PR via REST) returns a JSON object with html_url.
+            # All other subprocess.run calls in the test (git checkout,
+            # git add, git commit, etc.) are mocked to return success.
             def fake_run(args, **kwargs):
                 args_str = " ".join(str(a) for a in args)
-                if "push" in args_str:
-                    return mock.Mock(returncode=0, stdout="", stderr="")
-                if args_str.startswith("gh pr create"):
+                # `git remote get-url origin` -> return a fake URL
+                if "remote" in args_str and "get-url" in args_str:
                     return mock.Mock(
                         returncode=0,
-                        stdout="https://github.com/foo/bar/pull/42\n",
+                        stdout="https://github.com/SaCScaffolder/sac_example_ala_service_modified.git\n",
+                        stderr="",
+                    )
+                if "push" in args_str:
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+                if args_str.startswith("gh api"):
+                    # REST API returns JSON; pull html_url out.
+                    return mock.Mock(
+                        returncode=0,
+                        stdout='{"html_url": "https://github.com/SaCScaffolder/sac_example_ala_service_modified/pull/42"}\n',
                         stderr="",
                     )
                 # For `git rev-parse HEAD`, return a fake SHA.
@@ -239,7 +249,10 @@ class ResolvePathMismatchTests(unittest.TestCase):
 
         # The result reports the strategy and the PR URL.
         self.assertEqual(result.strategy, "PATH_MISMATCH")
-        self.assertEqual(result.pr_url, "https://github.com/foo/bar/pull/42")
+        self.assertEqual(
+            result.pr_url,
+            "https://github.com/SaCScaffolder/sac_example_ala_service_modified/pull/42",
+        )
         self.assertEqual(result.branch_name, "chore/resolve-refresh-conflict-abc12345")
         self.assertIn("ala_service_modified", result.message)
 
@@ -313,6 +326,51 @@ class ResolveConflictWithExistingServiceNameTests(unittest.TestCase):
                 run_id="abc12345",
             )
         self.assertIn("manual intervention required", str(cm.exception))
+
+
+class GithubOwnerRepoFromRemoteTests(unittest.TestCase):
+    """Tests for the `_github_owner_repo_from_remote` helper.
+
+    Used to construct REST API paths for opening the resolution
+    PR via `gh api` (instead of `gh pr create`, which needs
+    `pull_requests:read` GraphQL scope that the App token doesn't
+    have). The helper parses the remote URL.
+
+    Edge cases: optional `.git` suffix, no suffix, non-GitHub URLs
+    (raise), and non-owner/repo paths (raise).
+    """
+
+    def test_standard_https_url(self):
+        from servicectl.resolve import _github_owner_repo_from_remote
+        owner, repo = _github_owner_repo_from_remote(
+            "https://github.com/SaCScaffolder/sac_example_ala_service_modified.git"
+        )
+        self.assertEqual(owner, "SaCScaffolder")
+        self.assertEqual(repo, "sac_example_ala_service_modified")
+
+    def test_url_without_dot_git_suffix(self):
+        from servicectl.resolve import _github_owner_repo_from_remote
+        owner, repo = _github_owner_repo_from_remote(
+            "https://github.com/owner/repo"
+        )
+        self.assertEqual(owner, "owner")
+        self.assertEqual(repo, "repo")
+
+    def test_non_github_url_raises(self):
+        from servicectl.resolve import _github_owner_repo_from_remote
+        with self.assertRaises(RuntimeError) as cm:
+            _github_owner_repo_from_remote(
+                "git@github.com:SaCScaffolder/sac_example_ala_service_modified.git"
+            )
+        self.assertIn("not a GitHub URL", str(cm.exception))
+
+    def test_wrong_path_shape_raises(self):
+        from servicectl.resolve import _github_owner_repo_from_remote
+        with self.assertRaises(RuntimeError) as cm:
+            _github_owner_repo_from_remote(
+                "https://github.com/just/one/level.git"
+            )
+        self.assertIn("could not parse", str(cm.exception))
 
 
 if __name__ == "__main__":
