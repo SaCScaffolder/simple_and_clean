@@ -256,6 +256,21 @@ class ResolvePathMismatchTests(unittest.TestCase):
         self.assertEqual(result.branch_name, "chore/resolve-refresh-conflict-abc12345")
         self.assertIn("ala_service_modified", result.message)
 
+        # Regression: the `gh api` call must use the *interpolated*
+        # branch name and run id, not literal `{branch_name}` /
+        # `{run_id}` placeholders. This was the bug in commit
+        # b3025f8 -- a string-vs-f-string typo on the `head=` arg.
+        gh_api_call = next(
+            c for c in mock_run.call_args_list
+            if " ".join(str(a) for a in c.args[0]).startswith("gh api")
+        )
+        gh_api_args = " ".join(str(a) for a in gh_api_call.args[0])
+        self.assertIn("head=chore/resolve-refresh-conflict-abc12345", gh_api_args)
+        self.assertNotIn("{branch_name}", gh_api_args)
+        self.assertIn("title=chore(sac): resolve refresh conflict (run abc12345)", gh_api_args)
+        self.assertNotIn("{run_id}", gh_api_args)
+        self.assertIn("base=main", gh_api_args)
+
         # The config on disk now has the right service_name.
         updated = read_config(self.repo)
         self.assertEqual(updated.service_name, "ala_service_modified")

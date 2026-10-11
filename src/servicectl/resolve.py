@@ -419,7 +419,7 @@ def _resolve_path_mismatch(
             f"/repos/{owner}/{repo_name}/pulls",
             "-f", f"title=chore(sac): resolve refresh conflict (run {run_id})",
             "-f", f"body={pr_body}",
-            "-f", "head={branch_name}",
+            "-f", f"head={branch_name}",
             "-f", "base=main",
             # `gh api -f` serializes values as strings, which makes
             # `maintainer_can_modify=false` fail validation (the API
