@@ -670,6 +670,7 @@ def refresh(repo: Path, dry_run: bool, yes: bool) -> None:
     if dry_run:
         cfg = run.config
         cfg_lines = (
+            f"  service:     {cfg.service_name or '<not set; will fall back to dir name>'}\n"
             f"  template:    {cfg.template}\n"
             f"  ci:          {cfg.ci_provider}\n"
             f"  deploy:      {cfg.deploy_target}\n"

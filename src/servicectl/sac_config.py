@@ -47,10 +47,17 @@ SCHEMA_VERSION = 1
 class SacConfig:
     """The set of scaffolder inputs that produced a service.
 
-    Mirrors the ServiceGenerator constructor: name is implicit (it's the
-    service's directory name, written separately by the user as a rename)
-    so we don't store it here. The CLI is responsible for resolving the
-    name from `--repo`.
+    `service_name` is the service's package name as the scaffolder
+    wrote it (e.g. "billing-api"). It is stored so `servicectl refresh`
+    can regenerate the scaffold with the same name, even when the
+    repo's local directory name differs (the integration test clones
+    the fixture repo to `${REPO_NAME}` and the GitHub repo name is
+    often prefixed, e.g. `sac_example_ala_service_modified`, while the
+    spec's service name is the unprefixed `ala_service_modified`).
+    `from_generator` and `init` both write it; `refresh` reads it.
+    An empty string means "not set" -- the caller is expected to
+    fall back to the directory name in that case (graceful migration
+    for repos scaffolded before this field existed).
 
     `sac_base_commit` is the legacy-migration anchor: when set, commits
     reachable from this SHA (i.e. at or older than it) are treated as
@@ -64,6 +71,7 @@ class SacConfig:
     """
 
     schema_version: int = SCHEMA_VERSION
+    service_name: str = ""
     template: str = "python-flask"
     ci_provider: str = "github-actions"
     deploy_target: str = "local"
@@ -80,6 +88,7 @@ class SacConfig:
     def from_generator(
         cls,
         *,
+        name: str,
         template: str,
         ci_provider: str,
         deploy_target: str,
@@ -93,10 +102,14 @@ class SacConfig:
     ) -> "SacConfig":
         """Build a SacConfig from the same kwargs ServiceGenerator takes.
 
-        Pulled out as a factory so ServiceGenerator.run() can do a one-liner
-        rather than spelling the field list twice.
+        `name` is the service's package name (e.g. "billing-api"). It is
+        stored on the config so refresh can regenerate the scaffold with
+        the same name, independent of the directory the repo happens to
+        be cloned into. Pulled out as a factory so ServiceGenerator.run()
+        can do a one-liner rather than spelling the field list twice.
         """
         return cls(
+            service_name=name,
             template=template,
             ci_provider=ci_provider,
             deploy_target=deploy_target,
@@ -125,13 +138,22 @@ class SacConfig:
         legacy-migration path, not a scaffolder input. The ServiceGenerator
         would reject it as an unknown kwarg.
 
-        Note: `name` and `output_dir` are not part of the config; the
-        refresh CLI computes those from the `--repo` argument.
+        `service_name` is renamed to `name` here (the field the
+        ServiceGenerator constructor expects). The caller is responsible
+        for any further rename (e.g. falling back to the directory name
+        if `service_name` is empty, which signals a config that was
+        written before this field existed).
+
+        Note: `output_dir` is not part of the config; the refresh CLI
+        computes it from the `--repo` argument.
         """
         d = self.to_dict()
         d.pop("schema_version", None)
         d.pop("sac_version", None)
         d.pop("sac_base_commit", None)
+        # Map service_name -> name for the ServiceGenerator kwarg.
+        if "service_name" in d:
+            d["name"] = d.pop("service_name")
         return d
 
     @classmethod
@@ -177,7 +199,7 @@ class SacConfig:
         deploy = d.get("deploy", {})  # type: ignore[assignment]
 
         v1_flat: dict[str, object] = {
-            "name": service.get("name"),  # type: ignore[attr-defined]
+            "service_name": service.get("name"),  # type: ignore[attr-defined]
             "template": d.get("template"),
             "ci_provider": ci.get("provider", "github-actions"),
             "coverage_threshold": ci.get("coverage_threshold", 80),

@@ -329,6 +329,7 @@ class ServiceGenerator:
             # to re-pass the flags.
             try:
                 config = SacConfig.from_generator(
+                    name=self.name,
                     template=self.template,
                     ci_provider=self.ci_provider,
                     deploy_target=self.deploy_target,

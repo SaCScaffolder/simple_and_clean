@@ -366,12 +366,24 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
         # existing files except .git/ (which carries the worktree's
         # git metadata), then run ServiceGenerator.run(in_place=True)
         # so the fresh template tree lands at run.worktree_dir.
-        # `source_repo.resolve().name` is the original repo's basename
-        # (e.g. "billing-api"), which is what the regenerated scaffold's
-        # package path should be. resolve() is needed because the CLI
-        # accepts "." and Path(".").name == "" (empty). See
-        # _regenerate_scaffold for why.
-        _regenerate_scaffold(run.worktree_dir, source_repo.resolve().name, config)
+        #
+        # The service name used to regenerate the scaffold is the
+        # `service_name` field from `.servicectl.json` -- the name the
+        # original `init` used. We fall back to the source repo's
+        # directory name when `service_name` is empty, which happens
+        # for repos scaffolded before the field existed (graceful
+        # migration: refresh still runs, but the regenerated scaffold
+        # may not match what the developer commits expect -- the same
+        # broken-but-not-fatal behavior as before this field was
+        # added). For new scaffolds, `init` writes `service_name`
+        # explicitly so the regenerated scaffold always matches the
+        # original.
+        #
+        # `resolve()` is needed because the CLI accepts "." and
+        # `Path(".").name == ""` (empty). See _regenerate_scaffold
+        # for why.
+        scaffold_name = config.service_name or source_repo.resolve().name
+        _regenerate_scaffold(run.worktree_dir, scaffold_name, config)
 
         # Read the new scaffold commit's SHA for the run state.
         new_head = subprocess.run(
@@ -409,6 +421,12 @@ def _regenerate_scaffold(worktree_dir: Path, source_name: str, config: SacConfig
     into output_dir (no <name> subfolder). We pass the worktree itself
     as output_dir so the regenerated files land inside the worktree,
     not its parent.
+
+    The service name passed in `source_name` wins over the
+    `config.service_name` field if both are present. Callers should
+    pass the resolved name (the config field, falling back to the
+    source repo's directory name) so this function doesn't have to
+    reach into the config to derive it.
     """
     # Import lazily so generator -> sac_trailers -> replay -> generator
     # doesn't form a cycle at module-load time.
@@ -422,6 +440,13 @@ def _regenerate_scaffold(worktree_dir: Path, source_name: str, config: SacConfig
             shutil.rmtree(entry)
         else:
             entry.unlink()
+
+    # Drop `name` from the config-derived kwargs -- we pass it
+    # explicitly below as `source_name`. Without this pop the two
+    # would collide ("got multiple values for keyword argument
+    # 'name'") on a config that has `service_name` set.
+    gen_kwargs = config.to_generator_kwargs()
+    gen_kwargs.pop("name", None)
 
     # Use the source repo's name (e.g. "billing-api"), not the worktree's
     # basename (e.g. "sac-refresh-abc12345"). The worktree is just a
@@ -437,5 +462,5 @@ def _regenerate_scaffold(worktree_dir: Path, source_name: str, config: SacConfig
         in_place=True,
         with_git=True,
         with_readme=True,
-        **config.to_generator_kwargs(),
+        **gen_kwargs,
     ).run()
