@@ -72,6 +72,7 @@ The workflow doesn't need to change.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -328,17 +329,47 @@ def _resolve_path_mismatch(
     # Push. Use the GH_TOKEN env var (or fall back to GITHUB_TOKEN).
     # The integration test's workflow exports the App's installation
     # token as GH_TOKEN; locally, the user's PAT is read by `gh`.
-    push_result = subprocess.run(
-        ["git", "-C", str(source_repo), "push", "-u", "origin", branch_name],
-        capture_output=True,
-        text=True,
-    )
+    #
+    # We use a temporary GIT_ASKPASS script to inject the token into
+    # git's credential prompt. Without this, git would prompt for
+    # a username/password on stdin (which fails in non-TTY contexts
+    # like CI runners) or fall back to a 403 if no credentials are
+    # cached. The askpass approach matches the integration test's
+    # "Refresh — Force-push refreshed branch to main" step's pattern.
+    askpass = source_repo / ".git" / "sac-resolve-askpass.sh"
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        askpass.write_text(
+            "#!/bin/sh\n"
+            f'echo "{token}"\n'
+        )
+        askpass.chmod(0o700)
+        push_env = {
+            "GIT_ASKPASS": str(askpass),
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    else:
+        push_env = {}
+    try:
+        push_result = subprocess.run(
+            ["git", "-c", "credential.helper=", "-C", str(source_repo),
+             "push", "-u", "origin", branch_name],
+            capture_output=True,
+            text=True,
+            env={**os.environ, **push_env},
+        )
+    finally:
+        if askpass.exists():
+            askpass.unlink()
     if push_result.returncode != 0:
+        # Surface the stderr so the CLI's error panel can show the
+        # real reason (e.g. "403 Forbidden" or "repository not found").
+        err_msg = push_result.stderr.strip() or push_result.stdout.strip() or "unknown git push error"
         raise subprocess.CalledProcessError(
             push_result.returncode,
             push_result.args,
             push_result.stdout,
-            push_result.stderr,
+            err_msg,
         )
 
     # Open a PR. Use `gh pr create` (it reads the GH_TOKEN from the

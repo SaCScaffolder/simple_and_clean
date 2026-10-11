@@ -10,6 +10,7 @@ Run `servicectl init --help` for the full flag list.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -709,6 +710,29 @@ def refresh(repo: Path, dry_run: bool, yes: bool, resolve_on_conflict: bool) -> 
                     + "\n".join(f"    - {f}" for f in e.conflicting_files)
                     + f"\n\n"
                     f"  reason: {re_}\n\n"
+                    f"  recovery ref: [cyan]{e.recovery_ref}[/cyan]",
+                    title="resolution failed",
+                    border_style="red",
+                )
+            )
+            sys.exit(2)
+        except subprocess.CalledProcessError as cpe:
+            # The resolve step ran but a subprocess failed (e.g.
+            # `git push` returned non-zero, or `gh pr create` was
+            # rejected). The exception's stderr carries the real
+            # reason ("403 Forbidden", "no admin on this repo",
+            # "fetch first", etc.). Surface it so the user can
+            # diagnose without digging through the workflow log.
+            err_console.print(
+                Panel(
+                    f"[bold red]refresh halted: resolution subcommand failed[/bold red]\n\n"
+                    f"  command: {cpe.cmd}\n"
+                    f"  exit code: {cpe.returncode}\n"
+                    f"  stderr: {cpe.stderr or '(empty)'}\n"
+                    f"  stdout: {cpe.output or '(empty)'}\n\n"
+                    f"  conflicting files ({len(e.conflicting_files)}):\n"
+                    + "\n".join(f"    - {f}" for f in e.conflicting_files)
+                    + f"\n\n"
                     f"  recovery ref: [cyan]{e.recovery_ref}[/cyan]",
                     title="resolution failed",
                     border_style="red",
