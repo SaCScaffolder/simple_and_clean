@@ -412,7 +412,7 @@ def _resolve_path_mismatch(
             "pr",
             "create",
             "--base",
-            _current_branch_or_default(source_repo),
+            "main",
             "--head",
             branch_name,
             "--title",
