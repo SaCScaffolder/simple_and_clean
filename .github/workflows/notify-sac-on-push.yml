@@ -104,3 +104,56 @@ jobs:
             echo "::error::Dispatch failed with HTTP ${http_code}"
             exit 1
           fi
+
+      - name: Find the resulting sac integration-test-unmodified run
+        id: find-run
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          # Poll the sac repo's recent repository_dispatch runs until we
+          # find one whose display_title matches our event_type. The
+          # `head_sha` on a repository_dispatch run is the commit the
+          # sac workflow checked out (i.e. sac's own main), NOT the SHA
+          # we dispatched with -- so we filter on display_title instead.
+          # We also use `event=repository_dispatch` so unrelated runs
+          # (push-triggered integration tests) don't match.
+          for i in $(seq 1 30); do
+            RUN_ID=$(curl -sS \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/SaCScaffolder/sac/actions/runs?event=repository_dispatch&per_page=10" \
+              | python -c "
+          import json, sys
+          runs = json.load(sys.stdin).get('workflow_runs', [])
+          # Newest first; the first run whose workflow file is
+          # integration-test-unmodified.yml and display_title matches
+          # our event_type is the one we just dispatched.
+          for r in runs:
+              wf_path = r.get('path', '')
+              title = r.get('display_title', '')
+              if 'integration-test-unmodified' in wf_path \
+                 and title == 'simple_and_clean-updated':
+                  print(r['id'])
+                  break
+          ")
+            if [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ]; then
+              echo "run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+              echo "Found sac integration-test-unmodified run ${RUN_ID}"
+              exit 0
+            fi
+            echo "  attempt $i/30: no matching sac run yet, sleeping 5s"
+            sleep 5
+          done
+          echo "::error::No sac integration-test-unmodified run appeared within 150s of dispatch"
+          exit 1
+
+      - name: Watch sac integration-test-unmodified run to completion
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_ID: ${{ steps.find-run.outputs.run_id }}
+        run: |
+          echo "Watching sac run ${RUN_ID}..."
+          GH_TOKEN="${TOKEN}" gh run watch "${RUN_ID}" \
+            --repo SaCScaffolder/sac \
+            --exit-status
+          echo "::notice::sac integration-test-unmodified passed for ${{ github.sha }}"
