@@ -193,6 +193,53 @@ class ClassifyHistoryTests(unittest.TestCase):
         self.assertEqual(result["sac"][0], sha_2)
         self.assertEqual(result["sac"][1], sha_1)
 
+    def test_classify_skips_merge_commits(self):
+        """PR merge commits (which have 2+ parents and no SAC
+        trailers on the merge commit itself) must NOT be classified
+        as developer commits. Trying to cherry-pick a merge commit
+        fails with "exit status 128".
+
+        Regression for the bug surfaced in
+        sac_example_ala_service_modified PR #2 (the resolution PR
+        merge). The merge commit 71172fa2 had no SAC trailer, was
+        classified as developer, and the next refresh's cherry-pick
+        failed. Fix: detect merge commits via %P (parent count > 1)
+        and skip them. The underlying commit (one of the parents)
+        is already classified correctly.
+        """
+        # Create a feature branch and merge it into main without
+        # --no-ff-style commit (just a real merge).
+        subprocess.run(
+            ["git", "-C", str(self.repo), "checkout", "-q", "-b", "feature"],
+            check=True,
+        )
+        _commit(self.repo, ["feature work"], file_content="feature.go")
+        subprocess.run(
+            ["git", "-C", str(self.repo), "checkout", "-q", "main"],
+            check=True,
+        )
+        # Merge feature into main. The default behavior creates a
+        # merge commit (no fast-forward since main has its own
+        # commit).
+        subprocess.run(
+            ["git", "-C", str(self.repo), "merge", "--no-ff", "-q", "feature"],
+            check=True,
+        )
+
+        result = classify_history(self.repo)
+        # The merge commit must not appear in either bucket.
+        all_classified = result["sac"] + result["developer"]
+        merge_sha = subprocess.run(
+            ["git", "-C", str(self.repo), "log", "--format=%H", "-1", "--merges"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(len(merge_sha), 40, "expected a merge commit to exist")
+        self.assertNotIn(merge_sha, all_classified, (
+            f"merge commit {merge_sha} was classified as "
+            f"{'sac' if merge_sha in result['sac'] else 'developer'}; "
+            f"it should be skipped entirely"
+        ))
+
 
 class ClassifyHistoryLegacyTests(unittest.TestCase):
     """Tests for classify_history(repo, sac_base_commit=...).

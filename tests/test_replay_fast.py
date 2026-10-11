@@ -383,11 +383,29 @@ class RefreshLiveFastPathTests(unittest.TestCase):
             cmd = [str(x) for x in args]
             call_log.append(cmd)
             cmd_str = " ".join(cmd)
-            # classify_history's `git log --format=%H` => all SHAs newest-first.
-            if "log" in cmd and "--format=%H" in cmd and "trailers" not in cmd_str and "%B" not in cmd_str:
+            # classify_history's `git log --format=%H %P` => SHAs with
+            # their parent SHAs space-separated. We need to return
+            # each SHA with its actual parents so the merge-commit
+            # filter works (no merges in this fixture, so the format
+            # is "<sha> <parent>" for each commit). The format check
+            # uses `any("--format=%H" in a for a in cmd)` instead of
+            # `"--format=%H" in cmd` because the format string is now
+            # `"--format=%H %P"` (a single list element), and substring
+            # matching the literal `"--format=%H"` against a list of
+            # strings only returns True for an exact match.
+            if "log" in cmd and any("--format=%H" in a for a in cmd) and "trailers" not in cmd_str and "%B" not in cmd_str:
+                # all_shas is newest-first; the parent of each non-root
+                # commit is the next entry in all_shas. The root commit
+                # has no parent.
+                lines = []
+                for i, sha in enumerate(all_shas):
+                    if i + 1 < len(all_shas):
+                        lines.append(f"{sha} {all_shas[i+1]}")
+                    else:
+                        lines.append(f"{sha}")
                 return mock.Mock(
                     returncode=0,
-                    stdout="\n".join(all_shas) + "\n",
+                    stdout="\n".join(lines) + "\n",
                     stderr="",
                 )
             # read_trailer's `git log --format=%B -n 1 <sha>` => full commit
@@ -459,7 +477,14 @@ class RefreshLiveFastPathTests(unittest.TestCase):
         def fake_run(args, **kwargs):
             cmd = [str(x) for x in args]
             cmd_str = " ".join(cmd)
-            if "log" in cmd and "--format=%H" in cmd and "trailers" not in cmd_str and "%B" not in cmd_str:
+            # classify_history's `git log --format=%H %P` => SHAs with
+            # their parent SHAs space-separated. The format check uses
+            # substring-on-element (not `in` on the list) because
+            # `"--format=%H"` is now `"--format=%H %P"` (a single list
+            # element). This is the conflict-propagation variant of
+            # the test_live_refresh_full_path mock; see that test's
+            # comment for the full rationale.
+            if "log" in cmd and any("--format=%H" in a for a in cmd) and "trailers" not in cmd_str and "%B" not in cmd_str:
                 return mock.Mock(
                     returncode=0,
                     stdout="\n".join(all_shas) + "\n",

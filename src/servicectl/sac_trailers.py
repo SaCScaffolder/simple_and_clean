@@ -261,15 +261,39 @@ def classify_history(
         sac_ancestors = _ancestors_of(repo_path, resolved_sha)
 
     result = subprocess.run(
-        ["git", "-C", repo, "log", "--format=%H"],
+        # %P = parent SHAs (space-separated). A merge commit has 2+
+        # parents; we use this to skip PR merge commits that don't
+        # carry SAC trailers but aren't real developer commits
+        # either -- they're just artifacts of GitHub's "Merge pull
+        # request" button. (See issue: PR #2 in
+        # sac_example_ala_service_modified -- the merge commit
+        # 71172fa2 had no SAC trailer, was classified as developer,
+        # and the next refresh's cherry-pick failed with exit 128.)
+        ["git", "-C", repo, "log", "--format=%H %P"],
         capture_output=True,
         text=True,
         check=True,
     )
     out: dict[str, list[str]] = {"sac": [], "developer": []}
     for line in result.stdout.splitlines():
-        sha = line.strip()
-        if not sha:
+        parts = line.strip().split()
+        if not parts:
+            continue
+        sha = parts[0]
+        parents = parts[1:]
+        is_merge = len(parents) > 1
+        if is_merge:
+            # Skip merge commits. They aren't SAC-managed (no
+            # trailers on the merge commit itself) and they aren't
+            # user commits either -- they're artifacts of the PR
+            # merge process. Trying to cherry-pick a merge commit
+            # fails with "exit status 128".
+            #
+            # Note: the underlying commit (one of the parents) is
+            # already in the SAC bucket if it has SAC trailers, or
+            # will be re-classified from the linear history. We
+            # don't need to descend into the merge's parents --
+            # git log already walks them in order.
             continue
         if sha in sac_ancestors:
             bucket = "sac"
