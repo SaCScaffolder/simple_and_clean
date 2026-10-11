@@ -24,6 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import pytest  # noqa: E402  (used by the publish-tagged tests below)
+
 from servicectl.generator import ServiceGenerator  # noqa: E402
 
 
@@ -341,3 +343,136 @@ def test_rendered_gar_ci_has_no_preflight_package_check():
                             "run for non-GHCR registries. See PR #103."
                             f"\n\nGot:\n{ci_yml}"
                         )
+
+# ---------------------------------------------------------------------------
+# PR #104: tagged-release publishing (`publish-tagged` job).
+# ---------------------------------------------------------------------------
+
+
+def test_rendered_ghcr_ci_has_publish_tagged_job():
+    """Every GHCR scaffolded ci.yml must have a `publish-tagged` job that
+    only runs on v* tag pushes. This is the new PR #104 feature: tag a
+    commit with v1.2.3 and the image gets pushed with the
+    :X.Y.Z / :X.Y / :X / :<sha> / :latest tag set.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        g = _gen(registry="ghcr", deploy_target="local", gcp_project_id=None)
+        out = g.run()
+        ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        assert "publish-tagged:" in ci_yml, (
+            "ci.yml is missing the `publish-tagged` job. Tag pushes "
+            "(v1.2.3, v1.2.3-rc.1) need a dedicated job to derive "
+            "semver labels and push the image with multi-tag labels. "
+            "See PR #104."
+            f"\n\nGot:\n{ci_yml}"
+        )
+
+
+def test_rendered_publish_tagged_is_gated_on_v_tag():
+    """The `publish-tagged` job's `if:` must gate it on
+    `startsWith(github.ref, 'refs/tags/v')` so it only runs on v*
+    tag pushes, not on every push to main.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        g = _gen(registry="ghcr", deploy_target="local", gcp_project_id=None)
+        out = g.run()
+        ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        # Find the publish-tagged job and check its `if:`
+        lines = ci_yml.split("\n")
+        for i, line in enumerate(lines):
+            if re.match(r"^\s{2}publish-tagged:\s*$", line):
+                # Look ahead for `if:`
+                for j in range(i, min(i + 5, len(lines))):
+                    if lines[j].lstrip().startswith("if:"):
+                        assert "refs/tags/v" in lines[j], (
+                            f"publish-tagged job's `if:` doesn't gate on "
+                            f"refs/tags/v -- it will run on every push. "
+                            f"See PR #104.\n\nGot:\n{lines[j]}"
+                        )
+                        break
+                else:
+                    pytest.fail(
+                        "publish-tagged job has no `if:`. It will run on "
+                        "every push. See PR #104."
+                    )
+                return
+        pytest.fail(
+            "publish-tagged job not found in the right shape. See PR #104."
+            f"\n\nGot:\n{ci_yml}"
+        )
+
+
+def test_rendered_publish_tagged_pushes_five_tag_shapes():
+    """The publish-tagged job must push exactly five tag shapes:
+    :X.Y.Z, :X.Y, :X, :<sha>, :latest. Anything more is noise;
+    anything less means downstream consumers can't pin.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        g = _gen(registry="ghcr", deploy_target="local", gcp_project_id=None)
+        out = g.run()
+        ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        # Slice out the publish-tagged job only. It can be the last
+        # job in the file, in which case we slice to EOF.
+        lines = ci_yml.split("\n")
+        start = None
+        end = len(lines)
+        for i, line in enumerate(lines):
+            if re.match(r"^\s{2}publish-tagged:\s*$", line):
+                start = i
+            elif start is not None and re.match(r"^[a-zA-Z]", line):
+                # Next top-level key (e.g. another job). Stop.
+                end = i
+                break
+        assert start is not None, "publish-tagged job not found"
+        block = "\n".join(lines[start:end])
+        # 1. Exact semver
+        assert re.search(r"\$\{\{\s*steps\.version\.outputs\.version\s*\}\}", block), (
+            "publish-tagged doesn't push the :X.Y.Z tag (from "
+            "steps.version.outputs.version). See PR #104."
+            f"\n\nBlock:\n{block}"
+        )
+        # 2. Major.minor
+        assert re.search(
+            r"\$\{\{\s*steps\.version\.outputs\.major\s*\}\}\.\$\{\{\s*steps\.version\.outputs\.minor\s*\}\}",
+            block,
+        ), (
+            "publish-tagged doesn't push the :X.Y tag. See PR #104."
+            f"\n\nBlock:\n{block}"
+        )
+        # 3. Major
+        assert re.search(r"\$\{\{\s*steps\.version\.outputs\.major\s*\}\}", block), (
+            "publish-tagged doesn't push the :X tag. See PR #104."
+            f"\n\nBlock:\n{block}"
+        )
+        # 4. Sha
+        assert r"${{ github.sha }}" in block, (
+            "publish-tagged doesn't push the :<sha> tag. See PR #104."
+            f"\n\nBlock:\n{block}"
+        )
+        # 5. latest
+        assert re.search(r":latest\b", block), (
+            "publish-tagged doesn't push the :latest tag. See PR #104."
+            f"\n\nBlock:\n{block}"
+        )
+
+
+def test_rendered_publish_tagged_validates_semver_shape():
+    """The version-derivation step must validate that the tag is a real
+    semver (vX.Y.Z or vX.Y.Z-pre.N). A typo like v1.2 or vabc must
+    fail the job, not silently push garbage tags.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        g = _gen(registry="ghcr", deploy_target="local", gcp_project_id=None)
+        out = g.run()
+        ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        # The rendered bash uses `\\.` (a literal backslash followed
+        # by a period, so grep -E sees a regex `\.` -> literal dot).
+        # In the YAML file the bash single-quoted line has `\\` (two
+        # backslash characters). Look for the substring that proves
+        # semver validation is wired in.
+        assert "[0-9]+" in ci_yml and "\\.[0-9]+" in ci_yml, (
+            "publish-tagged's version step doesn't validate the "
+            "semver shape. A typo'd tag (v1.2) should fail the job. "
+            "See PR #104."
+            f"\n\nGot:\n{ci_yml}"
+        )
