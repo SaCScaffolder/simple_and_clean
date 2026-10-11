@@ -1,0 +1,163 @@
+# Fires `SaCScaffolder/sac`'s integration-test workflows with a synthetic
+# `simple_and_clean-updated` payload, the same way `notify-sac-on-push.yml`
+# would after a real merge to main on this repo. Lets ops / agents re-run
+# the integration test on demand without shipping a real code change.
+#
+# Why this exists:
+#
+#   - The integration test (`SaCScaffolder/sac/.github/workflows/
+#     integration-test-unmodified.yml` and `-modified.yml`) is
+#     triggered by `repository_dispatch: simple_and_clean-updated`.
+#   - In normal flow, a push to `simple_and_clean@main` triggers
+#     `notify-sac-on-push.yml` which POSTs the dispatch.
+#   - When iterating on the integration test itself (debugging a
+#     conflict, validating a resolution flow, simulating developer
+#     commits on a fixture), we want to fire the dispatch without
+#     making a real code change to the scaffolder.
+#   - This workflow is that handle: pick the SHA you want to
+#     dispatch as, fire it, and `sac` will scaffold from that
+#     commit (or the configured default).
+#
+# Triggered by:
+#   - workflow_dispatch         (manual UI / `gh workflow run ...`)
+#
+# Inputs:
+#   - example_name (choice): which sac integration test to fire.
+#     `unmodified` fires `integration-test-unmodified.yml`; `modified`
+#     fires `integration-test-modified.yml`. Both end up running the
+#     same `repository_dispatch` handler, so the choice is captured
+#     in `client_payload.example` for sac's logging.
+#   - sha (string, default: this repo's main HEAD): the
+#     `simple_and_clean` commit SHA we want sac to scaffold from.
+#     Defaults to whatever main is *now* -- but if you want a
+#     deterministic re-run (e.g. for a regression test or a
+#     duplicate-PR detection drill), pass an explicit older SHA.
+#   - reason (string, required): a free-text audit note explaining
+#     WHY this synthetic dispatch was fired. Required so future
+#     maintainers can grep the workflow runs and see what each
+#     synthetic trigger was for. Examples:
+#       "manual-test: duplicate-pr-detection-on-pr-25"
+#       "manual-test: service_name-fallback-with-sha-83a9e69"
+#       "ops: re-fire-after-failed-run-3812xxxxxxx"
+#
+# Secrets required (already exist on simple_and_clean per AGENTS.md):
+#   SAC_DISPATCH_APP_ID        - App ID (5230297, sacintegrationtesting)
+#   SAC_DISPATCH_APP_PEM       - .pem contents from the App's settings
+
+name: Mock simple_and_clean update
+
+"on":
+  workflow_dispatch:
+    inputs:
+      example_name:
+        description: "Which sac integration test to fire"
+        required: true
+        default: "unmodified"
+        type: choice
+        options:
+          - unmodified
+          - modified
+      sha:
+        description: "simple_and_clean commit SHA to dispatch as (default: this repo's main HEAD)"
+        required: false
+        default: ""
+        type: string
+      reason:
+        description: "Why this synthetic dispatch (audit log)"
+        required: true
+        type: string
+
+jobs:
+  mock-dispatch:
+    name: Fire synthetic simple_and_clean-updated dispatch to sac
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve dispatched SHA (fallback to main HEAD)
+        id: resolve
+        run: |
+          # Use the explicit input if the user provided one; otherwise
+          # default to whatever's at HEAD of this repo right now. The
+          # `--short` flag is the unambiguous form; `git rev-parse HEAD`
+          # would also work but the workflow env makes the full SHA
+          # available directly.
+          if [ -n "${{ inputs.sha }}" ]; then
+            DISPATCH_SHA="${{ inputs.sha }}"
+          else
+            DISPATCH_SHA="${{ github.sha }}"
+          fi
+          echo "dispatch_sha=${DISPATCH_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Dispatching with sha=${DISPATCH_SHA}"
+
+      - name: Mint installation token from GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.SAC_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.SAC_DISPATCH_APP_PEM }}
+          owner: SaCScaffolder
+
+      - name: POST repository_dispatch to sac
+        id: dispatch
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          SHA: ${{ steps.resolve.outputs.dispatch_sha }}
+          REF: refs/heads/main
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          EXAMPLE: ${{ inputs.example_name }}
+          REASON: ${{ inputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Build the client_payload inline so we can use a bash here-doc
+          # without quoting issues in the JSON. Mirrors the payload
+          # shape that notify-sac-on-push.yml sends, plus our two
+          # extras:
+          #   example: which integration test (unmodified/modified)
+          #   reason + mock_run_url: audit log fields so anyone
+          #     looking at sac's workflow run can trace it back here.
+          payload=$(cat <<EOF
+          {
+            "event_type": "simple_and_clean-updated",
+            "client_payload": {
+              "sha": "${SHA}",
+              "ref": "${REF}",
+              "repository": "${REPO}",
+              "sender": "${ACTOR}",
+              "example": "${EXAMPLE}",
+              "reason": "${REASON}",
+              "mock_run_url": "${RUN_URL}"
+            }
+          }
+          EOF
+          )
+
+          echo "POST https://api.github.com/repos/SaCScaffolder/sac/dispatches"
+          echo "Payload:"
+          echo "$payload"
+          echo
+
+          http_code=$(curl -sS -o /tmp/dispatch_body.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            -d "$payload" \
+            https://api.github.com/repos/SaCScaffolder/sac/dispatches)
+
+          echo "HTTP ${http_code}"
+          echo "Body:"
+          cat /tmp/dispatch_body.json
+          echo
+
+          # 204 No Content = success. The App's installation token has
+          # `contents: write` (added in the perms saga), so the
+          # cross-repo dispatch is authorized; the App DOES NOT have
+          # `pull_requests: write` (still needed for any flow that
+          # opens a PR via the App) -- but the dispatch itself only
+          # needs `contents: write`.
+          if [ "$http_code" != "204" ]; then
+            echo "::error::Synthetic dispatch failed with HTTP ${http_code}"
+            exit 1
+          fi
+          echo "::notice::Dispatched synthetic ${EXAMPLE} run with sha=${SHA} (reason: ${REASON})"
