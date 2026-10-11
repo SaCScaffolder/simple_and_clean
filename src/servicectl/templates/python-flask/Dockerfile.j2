@@ -11,6 +11,25 @@ RUN pip wheel --no-cache-dir --wheel-dir /wheels .
 FROM python:3.12-slim AS runtime
 WORKDIR /app
 
+# OCI image metadata. `org.opencontainers.image.source` is the
+# critical one: GitHub Packages uses it to auto-link a freshly-pushed
+# package to this repo on first push, so the workflow's GITHUB_TOKEN
+# (which has Packages: write scoped to *this repo's* namespace) can
+# push without the `permission_denied: write_package` rejection. Without
+# these labels the first push creates the package in the user/org
+# namespace and subsequent pushes from a different (rescaffolded) repo
+# fail. See PR #103.
+#
+# Pass the source URL at build time via --build-arg IMAGE_SOURCE=...
+# in ci.yml (the workflow substitutes the GitHub Actions expression
+# github.repository at run time).
+ARG IMAGE_SOURCE
+ARG IMAGE_URL
+LABEL org.opencontainers.image.source=${IMAGE_SOURCE} \
+      org.opencontainers.image.url=${IMAGE_URL} \
+      org.opencontainers.image.title="{{ service_name }}" \
+      org.opencontainers.image.description="Service scaffolded by servicectl from simple_and_clean"
+
 COPY --from=build /wheels /wheels
 RUN pip install --no-cache-dir --no-index --find-links=/wheels {{ service_name }} \
     && rm -rf /wheels

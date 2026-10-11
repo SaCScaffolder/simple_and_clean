@@ -84,8 +84,15 @@ jobs:
       - name: Build image
         # Pass VITE_API_BASE_URL so the bundle is configured at build time.
         # Vite inlines import.meta.env.VITE_* at build.
+        # IMAGE_SOURCE / IMAGE_URL are the OCI labels GitHub Packages
+        # uses to auto-link this image to the current repo on first
+        # push -- without them, GITHUB_TOKEN's Packages: write scope
+        # doesn't apply and the push fails with write_package denied.
+        # See PR #103 and the comment block in the Dockerfile.
         run: {% raw %}docker build \
           --build-arg VITE_API_BASE_URL=${VITE_API_BASE_URL:-/api} \
+          --build-arg IMAGE_SOURCE="https://github.com/${{ github.repository }}" \
+          --build-arg IMAGE_URL="https://github.com/${{ github.repository }}" \
           -t $IMAGE_NAME:${{ github.sha }} .{% endraw %}
 
       - name: Scan image (Trivy)
@@ -152,8 +159,46 @@ jobs:
           username: {% raw %}${{ github.actor }}{% endraw %}
           password: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
 
+      - name: "Pre-flight: check for stale mislinked GHCR package"
+        if: {% raw %}${{ env.IMAGE_NAME }}{% endraw %}.startsWith('ghcr.io/')
+        env:
+          GH_TOKEN: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
+        run: |
+          # PR #103: see the same step in go-webapi/ci.yml.j2 for context.
+          set -euo pipefail
+          {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          PKG_NAME=$(echo "$IMAGE_NAME" | sed 's|^ghcr.io/||')
+          HTTP_CODE=$(curl -s -o /tmp/pkg_check.json -w "%{http_code}" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/orgs/${OWNER}/packages/container/${PKG_NAME}")
+          case "$HTTP_CODE" in
+            404)
+              echo "Pre-flight OK: package ${PKG_NAME} does not exist in the org namespace yet."
+              ;;
+            200)
+              echo "::error::GHCR package '${PKG_NAME}' already exists in the org namespace."
+              echo "::error::This usually means a previous run of a different (rescaffolded) repo created it without the OCI image.source label."
+              echo "::error::The current repo's GITHUB_TOKEN can't write to it -- push would fail with 'permission_denied: write_package'."
+              echo "::error::"
+              echo "::error::Recovery: delete the stale package with a token that has delete:packages scope, then re-run this job:"
+              echo "::error::  gh api -X DELETE /orgs/${OWNER}/packages/container/${PKG_NAME} -H 'Authorization: Bearer <PAT with delete:packages>'"
+              echo "::error::"
+              cat /tmp/pkg_check.json
+              exit 1
+              ;;
+            *)
+              echo "::warning::Pre-flight got unexpected HTTP ${HTTP_CODE} checking package ${PKG_NAME}. Continuing."
+              cat /tmp/pkg_check.json
+              ;;
+          esac{% endraw %}
       - name: Push image
         run: |
+          # The OCI image.source label was set during the build step
+          # via --build-arg (see PR #103). It tells GHCR to auto-link
+          # this image to the current repo, so GITHUB_TOKEN's
+          # Packages: write covers the push.
           {% raw %}docker tag $IMAGE_NAME:${{ github.sha }} $IMAGE_NAME:latest
           docker push $IMAGE_NAME:${{ github.sha }}
           docker push $IMAGE_NAME:latest{% endraw %}
