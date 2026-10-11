@@ -209,3 +209,135 @@ def test_rendered_ghcr_workflow_still_has_publish_job():
             "in PR #99 should not have removed it for non-GAR registries."
             f"\n\nGot:\n{ci_yml}"
         )
+
+
+def test_rendered_dockerfile_has_oci_labels():
+    """Every scaffolded Dockerfile must have org.opencontainers.image.source
+    LABEL. Without that label, GitHub Packages can't auto-link a freshly-
+    pushed package to the current repo, and subsequent pushes from a
+    rescaffolded repo fail with `permission_denied: write_package`.
+
+    The label value is `ARG IMAGE_SOURCE` (templated at build time via
+    --build-arg in ci.yml) so the scaffolder doesn't need to know the
+    GitHub repo name at scaffold time.
+
+    See PR #103 and the trios-railway/scarab writeup that surfaced this:
+    https://github.com/gHashTag/trios-railway/pull/224
+    """
+    with tempfile.TemporaryDirectory() as td:
+        g = _gen(registry="ghcr", deploy_target="local", gcp_project_id=None)
+        out = g.run()
+        df = (out / "Dockerfile").read_text(encoding="utf-8")
+        assert "ARG IMAGE_SOURCE" in df, (
+            "Dockerfile missing `ARG IMAGE_SOURCE`. The OCI image.source "
+            "label is what tells GitHub Packages which repo a freshly-"
+            "pushed package belongs to. See PR #103."
+            f"\n\nGot:\n{df}"
+        )
+        assert "org.opencontainers.image.source" in df, (
+            "Dockerfile missing `org.opencontainers.image.source` LABEL. "
+            "This is the critical one for GHCR auto-linking. See PR #103."
+            f"\n\nGot:\n{df}"
+        )
+        # The LABEL must reference ${IMAGE_SOURCE} so the build-arg is
+        # actually used (not just defined).
+        assert re.search(
+            r"org\.opencontainers\.image\.source=\$\{IMAGE_SOURCE\}",
+            df,
+        ), (
+            "Dockerfile's image.source LABEL doesn't reference the "
+            "IMAGE_SOURCE build-arg. The label will be empty, breaking "
+            "GHCR auto-linking. See PR #103."
+            f"\n\nGot:\n{df}"
+        )
+
+
+def test_rendered_ghcr_ci_passes_image_source_build_arg():
+    """The CI workflow's docker build / build-push-action call must pass
+    IMAGE_SOURCE=https://github.com/${{ github.repository }} so the
+    Dockerfile's `ARG IMAGE_SOURCE` gets a real value at build time.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        g = _gen(registry="ghcr", deploy_target="local", gcp_project_id=None)
+        out = g.run()
+        ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        # Either the build step (docker build) or the publish step
+        # (docker build-push-action) must pass the arg. Most templates
+        # use the former; go-webapi uses both.
+        build_arg = re.search(
+            r"--build-arg\s+IMAGE_SOURCE=\"https://github.com/\$\{\{\s*github\.repository\s*\}\}\"",
+            ci_yml,
+        )
+        assert build_arg, (
+            "ci.yml doesn't pass `--build-arg IMAGE_SOURCE=...` to "
+            "docker build. The Dockerfile's `ARG IMAGE_SOURCE` will be "
+            "empty, and GHCR's package auto-link won't fire. See PR #103."
+            f"\n\nGot:\n{ci_yml}"
+        )
+
+
+def test_rendered_ghcr_ci_has_preflight_package_check():
+    """The GHCR publish job must pre-flight check for a stale mislinked
+    package before attempting `docker push`. Without this, the user gets
+    a half-finished pipeline and a cryptic `permission_denied:
+    write_package` deep inside the push step. With it, they get a clear
+    error at the pre-flight step with a copy-pasteable fix.
+
+    The check is gated on IMAGE_NAME starting with `ghcr.io/` so GAR
+    scaffolds don't run it (GAR doesn't have this namespace issue).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        g = _gen(registry="ghcr", deploy_target="local", gcp_project_id=None)
+        out = g.run()
+        ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        # The pre-flight step must exist with a recognizable name.
+        assert "Pre-flight: check for stale mislinked GHCR package" in ci_yml, (
+            "ci.yml is missing the pre-flight package check. See PR #103."
+            f"\n\nGot:\n{ci_yml}"
+        )
+        # It must query the org container-package endpoint.
+        assert "/packages/container/" in ci_yml, (
+            "Pre-flight step doesn't query /packages/container/ -- it "
+            "should be checking for the existing mislinked package. See PR #103."
+            f"\n\nGot:\n{ci_yml}"
+        )
+        # The failure path must tell the user how to delete the stale package.
+        assert "delete:packages" in ci_yml, (
+            "Pre-flight step's error message must mention the delete:packages "
+            "scope so the user knows what token they need. See PR #103."
+            f"\n\nGot:\n{ci_yml}"
+        )
+
+
+def test_rendered_gar_ci_has_no_preflight_package_check():
+    """GAR scaffolds must NOT run the pre-flight check -- GAR doesn't have
+    the user/org-vs-repo-package namespace issue (GAR's permissions model
+    is different: GAR namespaces are bucket-scoped, not org-scoped). The
+    `if:` on the pre-flight step must gate it on ghcr.io so GAR skips it.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        g = _gen(registry="gar", deploy_target="gcp-cloud-run", gcp_project_id="my-proj")
+        out = g.run()
+        ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        if "Pre-flight" in ci_yml:
+            # If the step is present at all, it MUST be gated on ghcr.io.
+            # Find the step and check the next non-empty line for `if:`.
+            lines = ci_yml.split("\n")
+            for i, line in enumerate(lines):
+                if "Pre-flight" in line and "name:" in line:
+                    # Look ahead for `if:`
+                    for j in range(i, min(i + 8, len(lines))):
+                        if lines[j].lstrip().startswith("if:"):
+                            assert "ghcr.io" in lines[j], (
+                                "GAR scaffold's pre-flight step is not gated "
+                                "on ghcr.io -- it would run unnecessarily "
+                                "for GAR. See PR #103."
+                                f"\n\nGot:\n{ci_yml}"
+                            )
+                            break
+                    else:
+                        pytest.fail(
+                            "Pre-flight step has no `if:` gating it. It will "
+                            "run for non-GHCR registries. See PR #103."
+                            f"\n\nGot:\n{ci_yml}"
+                        )

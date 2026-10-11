@@ -98,7 +98,14 @@ jobs:
 {% endif %}
       - uses: actions/checkout@v4
       - name: Build image
-        run: {% raw %}docker build -t $IMAGE_NAME:${{ github.sha }} .{% endraw %}
+        run: |
+          # The OCI image.source label is the key to GHCR's auto-link
+          # of freshly-pushed packages to the current repo. See PR #103
+          # and the comment block in the Dockerfile for the full story.
+          {% raw %}docker build \
+            --build-arg IMAGE_SOURCE="https://github.com/${{ github.repository }}" \
+            --build-arg IMAGE_URL="https://github.com/${{ github.repository }}" \
+            -t $IMAGE_NAME:${{ github.sha }} .{% endraw %}
       - name: Scan image (Trivy)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -163,11 +170,64 @@ jobs:
           registry: {{ registry_hostname }}
           username: {% raw %}${{ github.actor }}{% endraw %}
           password: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
+      - name: "Pre-flight: check for stale mislinked GHCR package"
+        if: {% raw %}${{ env.IMAGE_NAME }}{% endraw %}.startsWith('ghcr.io/')
+        env:
+          GH_TOKEN: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
+        run: |
+          # PR #103: detect a pre-existing org-scoped package that the
+          # current repo's GITHUB_TOKEN can't write to. If a *previous*
+          # run of a *different* (rescaffolded) repo created the package
+          # without the OCI image.source label, the push below will fail
+          # mid-step with `permission_denied: write_package`. Failing
+          # here, with a clear error and a copy-pasteable fix, is much
+          # less confusing than a half-built pipeline.
+          #
+          # Only runs for GHCR (other registries don't have this issue).
+          # The OCI label set in the Dockerfile (PR #103) prevents new
+          # mislinks; this check is a safety net for old ones.
+          set -euo pipefail
+          {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          # Strip ghcr.io/ prefix; package name is the third path segment
+          PKG_NAME=$(echo "$IMAGE_NAME" | sed 's|^ghcr.io/||')
+          HTTP_CODE=$(curl -s -o /tmp/pkg_check.json -w "%{http_code}" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/orgs/${OWNER}/packages/container/${PKG_NAME}")
+          case "$HTTP_CODE" in
+            404)
+              echo "Pre-flight OK: package ${PKG_NAME} does not exist in the org namespace yet."
+              ;;
+            200)
+              echo "::error::GHCR package '${PKG_NAME}' already exists in the org namespace."
+              echo "::error::This usually means a previous run of a different (rescaffolded) repo created it without the OCI image.source label."
+              echo "::error::The current repo's GITHUB_TOKEN can't write to it -- push would fail with 'permission_denied: write_package'."
+              echo "::error::"
+              echo "::error::Recovery: delete the stale package with a token that has delete:packages scope, then re-run this job:"
+              echo "::error::  gh api -X DELETE /orgs/${OWNER}/packages/container/${PKG_NAME} -H 'Authorization: Bearer <PAT with delete:packages>'"
+              echo "::error::"
+              echo "::error::Existing package state:"
+              cat /tmp/pkg_check.json
+              exit 1
+              ;;
+            *)
+              echo "::warning::Pre-flight got unexpected HTTP ${HTTP_CODE} checking package ${PKG_NAME}. Continuing; push may fail with permission_denied: write_package."
+              cat /tmp/pkg_check.json
+              ;;
+          esac{% endraw %}
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
+          # OCI image.source is the key to GHCR's auto-link. See PR #103.
+          # The raw block below is needed because the dollar-curly-brace
+          # syntax is also a Jinja expression; without raw, the scaffolder
+          # would try to evaluate github.repository at scaffold time.
+          build-args: |
+            {% raw %}IMAGE_SOURCE=https://github.com/${{ github.repository }}
+            IMAGE_URL=https://github.com/${{ github.repository }}{% endraw %}
           tags: |
             {% raw %}${{ env.IMAGE_NAME }}:${{ github.sha }}
             ${{ env.IMAGE_NAME }}:latest{% endraw %}
