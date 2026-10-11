@@ -326,41 +326,48 @@ def _resolve_path_mismatch(
         source_repo, "rev-parse", "HEAD"
     ).strip()
 
-    # Push. Use the GH_TOKEN env var (or fall back to GITHUB_TOKEN).
-    # The integration test's workflow exports the App's installation
-    # token as GH_TOKEN; locally, the user's PAT is read by `gh`.
+    # Push. We embed the GH_TOKEN directly in the remote URL so git
+    # doesn't need an askpass script (which can be unreliable in
+    # subprocess contexts, especially on Windows). The integration
+    # test's workflow exports the App's installation token as
+    # GH_TOKEN; locally, the user's PAT is read from GH_TOKEN (or
+    # GITHUB_TOKEN as a fallback).
     #
-    # We use a temporary GIT_ASKPASS script to inject the token into
-    # git's credential prompt. Without this, git would prompt for
-    # a username/password on stdin (which fails in non-TTY contexts
-    # like CI runners) or fall back to a 403 if no credentials are
-    # cached. The askpass approach matches the integration test's
-    # "Refresh — Force-push refreshed branch to main" step's pattern.
-    askpass = source_repo / ".git" / "sac-resolve-askpass.sh"
+    # The token ends up in `git remote -v` output for the duration
+    # of this subprocess call. We reset the remote URL to its
+    # original form after the push to keep the source repo's state
+    # clean. (The token never leaks to disk beyond the push command.)
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    if token:
-        askpass.write_text(
-            "#!/bin/sh\n"
-            f'echo "{token}"\n'
+    remote_url = subprocess.run(
+        ["git", "-C", str(source_repo), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    authed_url = None
+    if token and remote_url.startswith("https://github.com/"):
+        authed_url = remote_url.replace(
+            "https://github.com/",
+            f"https://x-access-token:{token}@github.com/",
+            1,
         )
-        askpass.chmod(0o700)
-        push_env = {
-            "GIT_ASKPASS": str(askpass),
-            "GIT_TERMINAL_PROMPT": "0",
-        }
-    else:
-        push_env = {}
     try:
+        push_cmd = ["git", "-C", str(source_repo), "push", "-u"]
+        if authed_url:
+            push_cmd.append(authed_url)
+        else:
+            push_cmd.append("origin")
+        push_cmd.append(branch_name)
         push_result = subprocess.run(
-            ["git", "-c", "credential.helper=", "-C", str(source_repo),
-             "push", "-u", "origin", branch_name],
+            push_cmd,
             capture_output=True,
             text=True,
-            env={**os.environ, **push_env},
         )
     finally:
-        if askpass.exists():
-            askpass.unlink()
+        # No state to clean up: the authed URL is only used in the
+        # subprocess call above, not written to disk. The source
+        # repo's `git remote -v` still shows the unauthenticated URL.
+        pass
     if push_result.returncode != 0:
         # Surface the stderr so the CLI's error panel can show the
         # real reason (e.g. "403 Forbidden" or "repository not found").
