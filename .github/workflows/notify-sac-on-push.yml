@@ -27,6 +27,20 @@ name: Notify sac on push
 #
 # Triggered by:
 #   - push: branches: [main]          (auto-fire on merge to main)
+#   - pull_request: types: [opened, synchronize, reopened]
+#                                     (auto-fire on PR open / new
+#                                     commits pushed to the PR branch
+#                                     / reopens. The integration test
+#                                     runs against the PR's exact head
+#                                     SHA, scaffolding from it via
+#                                     `git submodule update --init
+#                                     --remote simple_and_clean` to
+#                                     the PR's commit, not main's.
+#                                     This makes the integration test
+#                                     a PR check, not just a post-
+#                                     merge canary -- so a bad
+#                                     scaffolder change is caught
+#                                     before merge, not after.)
 #   - workflow_dispatch               (manual re-fire from the
 #                                     Actions tab while iterating)
 #
@@ -43,6 +57,8 @@ name: Notify sac on push
 on:
   push:
     branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 jobs:
