@@ -624,7 +624,18 @@ def doctor(path: Path, strict: bool, as_json: bool, pause: bool) -> None:
     is_flag=True,
     help="Skip the interactive confirmation prompt.",
 )
-def refresh(repo: Path, dry_run: bool, yes: bool) -> None:
+@click.option(
+    "--resolve-on-conflict",
+    is_flag=True,
+    help=(
+        "On a RefreshConflict, automatically create a branch with a "
+        "resolution commit and open a PR against the source repo. "
+        "The PR URL is printed on stdout so the integration test's CI "
+        "can wait on it. Default behavior (no flag) is to surface the "
+        "conflict and let the user resolve manually."
+    ),
+)
+def refresh(repo: Path, dry_run: bool, yes: bool, resolve_on_conflict: bool) -> None:
     """Refresh an existing scaffolded service against the current simple_and_clean.
 
     Classifies the repo's commits into SAC-managed (filtered out) and
@@ -639,6 +650,13 @@ def refresh(repo: Path, dry_run: bool, yes: bool) -> None:
     `servicectl init`). Without it, refresh refuses to guess the
     template/deploy/registry flags -- a wrong guess would silently
     change the service.
+
+    With `--resolve-on-conflict`, a `RefreshConflict` triggers
+    automatic resolution: a new branch is created on the source
+    repo, a resolution commit is pushed, and a PR is opened. The PR
+    URL is printed on stdout (and exit code is 0). The integration
+    test's CI workflow polls this URL and waits for the PR to merge,
+    then re-runs refresh.
     """
     from .replay import refresh as replay_refresh
 
@@ -653,19 +671,67 @@ def refresh(repo: Path, dry_run: bool, yes: bool) -> None:
         err_console.print(f"[bold red]error:[/bold red] {e}")
         sys.exit(2)
     except RefreshConflict as e:
-        err_console.print(
+        if not resolve_on_conflict:
+            err_console.print(
+                Panel(
+                    f"[bold red]refresh halted: cherry-pick conflict[/bold red]\n\n"
+                    f"  conflicting files ({len(e.conflicting_files)}):\n"
+                    + "\n".join(f"    - {f}" for f in e.conflicting_files)
+                    + f"\n\n"
+                    f"  recovery ref: [cyan]{e.recovery_ref}[/cyan]\n"
+                    f"  recover with:  git update-ref refs/heads/<branch> {e.recovery_ref}",
+                    title="refresh failed",
+                    border_style="red",
+                )
+            )
+            sys.exit(2)
+        # Resolve-on-conflict: try to fix the conflict via a PR.
+        from .resolve import resolve_conflict as do_resolve
+        try:
+            # The conflict might be on a config the user has touched;
+            # re-read the config from disk in case the in-memory copy
+            # is stale. (refresh() reads the config early; if anything
+            # else wrote to .servicectl.json between then and now, we'd
+            # want to pick that up.)
+            from .sac_config import read_config as read_cfg_fresh
+            fresh_config = read_cfg_fresh(repo)
+            result = do_resolve(
+                source_repo=repo,
+                conflicting_files=e.conflicting_files,
+                config=fresh_config,
+                run_id=e.recovery_ref.split("-")[-1],
+            )
+        except RuntimeError as re_:
+            err_console.print(
+                Panel(
+                    f"[bold red]refresh halted: could not auto-resolve[/bold red]\n\n"
+                    f"  conflicting files ({len(e.conflicting_files)}):\n"
+                    + "\n".join(f"    - {f}" for f in e.conflicting_files)
+                    + f"\n\n"
+                    f"  reason: {re_}\n\n"
+                    f"  recovery ref: [cyan]{e.recovery_ref}[/cyan]",
+                    title="resolution failed",
+                    border_style="red",
+                )
+            )
+            sys.exit(2)
+        # Print the PR URL on stdout so the CI can read it. The CI's
+        # wait-on-PR step looks for this line.
+        print(f"resolution_pr_url: {result.pr_url}")
+        console.print(
             Panel(
-                f"[bold red]refresh halted: cherry-pick conflict[/bold red]\n\n"
-                f"  conflicting files ({len(e.conflicting_files)}):\n"
-                + "\n".join(f"    - {f}" for f in e.conflicting_files)
-                + f"\n\n"
-                f"  recovery ref: [cyan]{e.recovery_ref}[/cyan]\n"
-                f"  recover with:  git update-ref refs/heads/<branch> {e.recovery_ref}",
-                title="refresh failed",
-                border_style="red",
+                f"[bold green]resolution PR created[/bold green]\n\n"
+                f"  strategy:    {result.strategy}\n"
+                f"  branch:      {result.branch_name}\n"
+                f"  commit:      {result.commit_sha[:12]}\n"
+                f"  PR:          {result.pr_url}\n\n"
+                f"  {result.message}\n\n"
+                f"Next: wait for the PR to merge, then re-run refresh.",
+                title="refresh conflict resolved",
+                border_style="green",
             )
         )
-        sys.exit(2)
+        return
 
     if dry_run:
         cfg = run.config
