@@ -381,7 +381,7 @@ class ServiceGenerator:
                 )
                 subprocess.run(
                     ["git", "-C", str(target), "-c", "user.email=servicectl@example.com",
-                     "-c", "user.name=servicectl", "commit", "-q",
+                     "-c", "user.name=servicectl", "commit", "-q", "--allow-empty",
                      "-m", subject, "-m", trailer_block],
                     check=True,
                     capture_output=True,
