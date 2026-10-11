@@ -22,20 +22,32 @@ from servicectl.generator import ServiceGenerator  # noqa: E402
 # Each entry: (template, registry, expected IMAGE_NAME substring in
 # rendered ci.yml). Pin to a release (vX.Y.Z) so this script also
 # catches bare-semver trivy-action pins that aren't resolvable.
+# The expected IMAGE_NAME substring is the one that *must* be present
+# after the {% if %} branch has selected the right path shape for
+# the registry. For GHCR the rendered line is built in bash, so the
+# substring includes literal `${OWNER}/${REPO}/<service>`.
 CHECKS = [
     # (template, registry, deploy_target, gcp_project_id, expected_registry, expected_image_substring)
     ("go-webapi", "gar", "gcp-cloud-run", "my-cool-project",
      "us-central1-docker.pkg.dev", "IMAGE_NAME=us-central1-docker.pkg.dev/my-cool-project/${REPO}"),
     ("go-webapi", "ghcr", "local", None,
-     "ghcr.io", "IMAGE_NAME=ghcr.io/${OWNER}/${REPO}"),
+     "ghcr.io", "IMAGE_NAME=ghcr.io/${OWNER}/${REPO}/lint-go-webapi-ghcr"),
     ("dotnet-webapi", "gar", "gcp-cloud-run", "another-project",
      "us-central1-docker.pkg.dev", "IMAGE_NAME=us-central1-docker.pkg.dev/another-project/${REPO}"),
+    ("dotnet-webapi", "ghcr", "local", None,
+     "ghcr.io", "IMAGE_NAME=ghcr.io/${OWNER}/${REPO}/lint-dotnet-webapi-ghcr"),
     ("node-express", "gar", "gcp-cloud-run", "node-gar-proj",
      "us-central1-docker.pkg.dev", "IMAGE_NAME=us-central1-docker.pkg.dev/node-gar-proj/${REPO}"),
+    ("node-express", "ghcr", "local", None,
+     "ghcr.io", "IMAGE_NAME=ghcr.io/${OWNER}/${REPO}/lint-node-express-ghcr"),
     ("node-react-web", "gar", "gcp-cloud-run", "react-gar-proj",
      "us-central1-docker.pkg.dev", "IMAGE_NAME=us-central1-docker.pkg.dev/react-gar-proj/${REPO}"),
+    ("node-react-web", "ghcr", "local", None,
+     "ghcr.io", "IMAGE_NAME=ghcr.io/${OWNER}/${REPO}/lint-node-react-web-ghcr"),
     ("python-flask", "gar", "gcp-cloud-run", "flask-gar-proj",
      "us-central1-docker.pkg.dev", "IMAGE_NAME=us-central1-docker.pkg.dev/flask-gar-proj/${REPO}"),
+    ("python-flask", "ghcr", "local", None,
+     "ghcr.io", "IMAGE_NAME=ghcr.io/${OWNER}/${REPO}/lint-python-flask-ghcr"),
 ]
 
 
