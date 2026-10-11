@@ -104,7 +104,10 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
-{% if ci_provider == 'github-actions' %}
+{% if ci_provider == 'github-actions' and registry != 'gar' %}
+  # GAR pushes don't use GITHUB_TOKEN; they need GCP auth (WIF or a SA key).
+  # The GAR-aware push path is in deploy/gcp/deploy.yml.j2; users wire that
+  # to workflow_dispatch or push-to-main. See PR #99 for the long form.
   publish:
     name: publish
     runs-on: ubuntu-latest

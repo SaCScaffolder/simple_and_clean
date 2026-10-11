@@ -106,10 +106,12 @@ def test_image_name_for_gar_falls_back_to_placeholder_when_project_missing():
 
 
 def test_rendered_workflow_uses_gar_image_path_for_gar_registry():
-    """The full scaffold + render: ci.yml's IMAGE_NAME must include
+    """The full scaffold + render: ci.yml's build-job IMAGE_NAME must include
     `<region>-docker.pkg.dev/<project-id>/${REPO}`, not `gar/...`.
 
-    This is the regression test for the broken `gar` alias.
+    This is the regression test for the broken `gar` alias. (PR #99 later
+    removed the publish job for GAR entirely since GITHUB_TOKEN can't push
+    to GAR, so the assertion now lives in the build job, not publish.)
     """
     with tempfile.TemporaryDirectory() as td:
         out = _gen(output_dir=Path(td)).run()
@@ -125,12 +127,6 @@ def test_rendered_workflow_uses_gar_image_path_for_gar_registry():
         # Must contain the regional GAR hostname with the project ID.
         assert "us-central1-docker.pkg.dev/my-cool-project" in ci_yml, (
             "Expected the GAR image path with the project ID baked in. "
-            f"Got:\n{ci_yml}"
-        )
-        # And the login step's `registry:` field must point at the GAR hostname.
-        assert "registry: us-central1-docker.pkg.dev" in ci_yml, (
-            "docker/login-action's `registry:` field is still pointing at the "
-            "wrong hostname. Expected `registry: us-central1-docker.pkg.dev`.\n\n"
             f"Got:\n{ci_yml}"
         )
 
@@ -163,4 +159,37 @@ def test_rendered_workflow_trivy_pin_is_resolvable():
             f"trivy-action pin `{pin}` is missing the `v` prefix; bare semver "
             "tags aren't resolvable as Actions versions. Pin must match a "
             "published release tag (e.g. `v0.36.0`)."
+        )
+
+
+def test_rendered_gar_workflow_has_no_publish_job():
+    """GAR doesn't accept GITHUB_TOKEN; the CI publish job would always fail
+    with `permission_denied: write_package`. The scaffolder omits it for GAR
+    and points users at deploy/gcp/deploy.yml.j2 (which uses WIF instead).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        out = _gen(output_dir=Path(td)).run()
+        ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        # A `publish:` job at column 0 (top-level key) means the scaffolder
+        # rendered the publish job. Comments mentioning "publish" are fine.
+        assert not re.search(r"^  publish:", ci_yml, re.MULTILINE), (
+            "GAR scaffolds must not render a `publish:` job in ci.yml — it "
+            "would always fail with permission_denied. The GAR-aware push "
+            "path is in deploy/gcp/deploy.yml.j2.\n\n"
+            f"Got:\n{ci_yml}"
+        )
+
+
+def test_rendered_ghcr_workflow_still_has_publish_job():
+    """GHCR scaffolds must still render the publish job. We didn't regress
+    the GAR fix into breaking GHCR.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        g = _gen(registry="ghcr", deploy_target="local", gcp_project_id=None)
+        out = g.run()
+        ci_yml = (out / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        assert re.search(r"^  publish:", ci_yml, re.MULTILINE), (
+            "GHCR scaffolds must still render a `publish:` job. The GAR fix "
+            "in PR #99 should not have removed it for non-GAR registries."
+            f"\n\nGot:\n{ci_yml}"
         )
