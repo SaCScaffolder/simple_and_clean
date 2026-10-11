@@ -65,12 +65,21 @@ jobs:
         run: |
           {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           REPO=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
+{% if registry == 'gar' %}
+          # GAR image paths are `<region>-docker.pkg.dev/<project-id>/<repo>`.
+          # The org (`${OWNER}`) is the *GitHub* org and is unrelated to the
+          # GCP project the registry lives in — we use the project ID baked
+          # into the spec at scaffold time instead. Lowercased to satisfy
+          # Docker's image-ref requirements.
+          echo "IMAGE_NAME={{ registry_hostname }}/{{ gcp_project_id | lower }}/${REPO}" >> "$GITHUB_ENV"
+{% else %}
           echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/${REPO}" >> "$GITHUB_ENV"
+{% endif %}
       - uses: actions/checkout@v4
       - name: Build image
         run: {% raw %}docker build -t $IMAGE_NAME:${{ github.sha }} .{% endraw %}
       - name: Scan image (Trivy)
-        uses: aquasecurity/trivy-action@0.20.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: {% raw %}$IMAGE_NAME:${{ github.sha }}{% endraw %}
           severity: HIGH,CRITICAL
@@ -95,7 +104,16 @@ jobs:
         run: |
           {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           REPO=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
+{% if registry == 'gar' %}
+          # GAR image paths are `<region>-docker.pkg.dev/<project-id>/<repo>`.
+          # The org (`${OWNER}`) is the *GitHub* org and is unrelated to the
+          # GCP project the registry lives in — we use the project ID baked
+          # into the spec at scaffold time instead. Lowercased to satisfy
+          # Docker's image-ref requirements.
+          echo "IMAGE_NAME={{ registry_hostname }}/{{ gcp_project_id | lower }}/${REPO}" >> "$GITHUB_ENV"
+{% else %}
           echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/${REPO}" >> "$GITHUB_ENV"
+{% endif %}
       - uses: actions/checkout@v4
       # Log in to {{ registry }} with the workflow's GITHUB_TOKEN. The
       # image is in the current repo's own package namespace (see
@@ -110,7 +128,7 @@ jobs:
       # write" for GITHUB_TOKEN to carry that scope.
       - uses: docker/login-action@v3
         with:
-          registry: {{ registry }}
+          registry: {{ registry_hostname }}
           username: {% raw %}${{ github.actor }}{% endraw %}
           password: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
       - name: Push image

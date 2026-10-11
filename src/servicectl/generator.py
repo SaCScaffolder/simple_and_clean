@@ -168,9 +168,28 @@ class ServiceGenerator:
             "db_docker_image": db_meta["docker_image"],
             "db_env_prefix": db_meta["env_prefix"],
             "db_healthcheck_cmd": db_meta["healthcheck_cmd"],
-            "image_name": f"{self._registry_hostname()}/{self.name}",
+            "image_name": self._render_image_name(),
             "registry_hostname": self._registry_hostname(),
         }
+
+    def _render_image_name(self) -> str:
+        """Build the full image reference (hostname + path) for self.registry.
+
+        Most registries use `<hostname>/<repo>`, but GAR requires the GCP
+        project ID as the path's first segment: `<region>-docker.pkg.dev/<project>/<repo>`.
+        Without the project segment, GAR login succeeds but pushes land in
+        the wrong namespace. `gcp_project_id` defaults to the placeholder
+        `"REPLACE_WITH_GCP_PROJECT_ID"` when the scaffolder was invoked
+        without it; the rendered Terraform refuses to apply until that's
+        replaced, and the workflow's image push will fail with a clear
+        "repository not found" rather than silently going to the wrong
+        place.
+        """
+        hostname = self._registry_hostname()
+        if self.registry.lower() == "gar":
+            project = self.gcp_project_id or "REPLACE_WITH_GCP_PROJECT_ID"
+            return f"{hostname}/{project}/{self.name}"
+        return f"{hostname}/{self.name}"
 
     def _registry_hostname(self) -> str:
         """Return the canonical registry hostname for self.registry.
@@ -181,6 +200,13 @@ class ServiceGenerator:
         This maps the common short forms to their full hostnames; anything
         not in the table is passed through unchanged so private registries
         with explicit hostnames keep working.
+
+        Note on `gar`: GAR's hostname is regional (`<region>-docker.pkg.dev`),
+        so the expansion depends on `self.gcp_region`. If `gcp_region` is
+        unset (e.g. a non-GCP scaffold that still passes `registry=gar`),
+        we fall back to the placeholder so the rendered workflow at least
+        points at a syntactically valid GAR hostname shape rather than the
+        literal `gar` (which DNS can't resolve).
         """
         aliases = {
             "ghcr": "ghcr.io",
@@ -188,6 +214,7 @@ class ServiceGenerator:
             "docker": "docker.io",
             "acr": "",  # ACR requires a fully-qualified .azurecr.io; pass-through.
             "gcr": "gcr.io",
+            "gar": f"{self.gcp_region}-docker.pkg.dev",
         }
         return aliases.get(self.registry.lower(), self.registry)
 

@@ -80,7 +80,16 @@ jobs:
         run: |
           {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           REPO=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
+{% if registry == 'gar' %}
+          # GAR image paths are `<region>-docker.pkg.dev/<project-id>/<repo>`.
+          # The org (`${OWNER}`) is the *GitHub* org and is unrelated to the
+          # GCP project the registry lives in — we use the project ID baked
+          # into the spec at scaffold time instead. Lowercased to satisfy
+          # Docker's image-ref requirements.
+          echo "IMAGE_NAME={{ registry_hostname }}/{{ gcp_project_id | lower }}/${REPO}" >> "$GITHUB_ENV"
+{% else %}
           echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/${REPO}" >> "$GITHUB_ENV"
+{% endif %}
       - uses: actions/checkout@v4
       - name: Build image
         run: {% raw %}docker build -t $IMAGE_NAME:${{ github.sha }} .{% endraw %}
@@ -106,7 +115,16 @@ jobs:
         run: |
           {% raw %}OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           REPO=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]'){% endraw %}
+{% if registry == 'gar' %}
+          # GAR image paths are `<region>-docker.pkg.dev/<project-id>/<repo>`.
+          # The org (`${OWNER}`) is the *GitHub* org and is unrelated to the
+          # GCP project the registry lives in — we use the project ID baked
+          # into the spec at scaffold time instead. Lowercased to satisfy
+          # Docker's image-ref requirements.
+          echo "IMAGE_NAME={{ registry_hostname }}/{{ gcp_project_id | lower }}/${REPO}" >> "$GITHUB_ENV"
+{% else %}
           echo "IMAGE_NAME={{ registry_hostname }}/${OWNER}/${REPO}" >> "$GITHUB_ENV"
+{% endif %}
       - uses: actions/checkout@v4
       # Build AND push in one job so the image is available on this runner.
       # The earlier design built in the `build` step and tried to push from a
