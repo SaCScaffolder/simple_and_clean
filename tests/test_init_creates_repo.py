@@ -287,3 +287,82 @@ def test_init_repo_private_flag_makes_repo_private():
     )
     assert result.exit_code == 0, result.output
     assert mock_create.call_args.kwargs["private"] is True
+
+
+def test_init_creates_repo_writes_askpass_when_no_env_askpass():
+    """When GIT_ASKPASS isn't set, init writes a temporary askpass
+    script and uses it to authenticate the push. The script is
+    cleaned up after. This is the CI-runner path: no credential
+    helper, no TTY, the only way to authenticate `git push` is
+    ASKPASS. The integration test workflow relies on this behavior
+    (it does not set GIT_ASKPASS in the env for the init step)."""
+    result, _, mock_subprocess = _run_init(
+        args=["my-service", "--template=go-webapi", "--repo", "SaCScaffolder/my-service"],
+        env={"GH_TOKEN": "ghp_test_token_for_unit_test_only_xxxxx"},
+    )
+    assert result.exit_code == 0, result.output
+    # Find the git push call and inspect its env kwarg.
+    push_calls = [
+        c for c in mock_subprocess.call_args_list
+        if c.args and c.args[0] and c.args[0][0:3] == ["git", "-C", c.args[0][2]]
+        and "push" in c.args[0]
+    ]
+    assert len(push_calls) == 1, f"expected exactly one push call, got: {push_calls}"
+    push_env = push_calls[0].kwargs.get("env", {})
+    assert "GIT_ASKPASS" in push_env, (
+        f"expected GIT_ASKPASS in push env, got: {push_env}"
+    )
+    askpass_path = push_env["GIT_ASKPASS"]
+    # The file existed during the push and was deleted after.
+    # (We can't assert the file existed at push time because
+    # the test runs after the cleanup. We assert the path is
+    # cleaned up.)
+    assert not Path(askpass_path).exists(), (
+        f"askpass file was not cleaned up: {askpass_path}"
+    )
+
+
+def test_init_creates_repo_respects_existing_git_askpass():
+    """If GIT_ASKPASS is already in the env, init uses it and does
+    NOT write its own. This is the local-dev case where the user
+    has configured their own credential helper as a GIT_ASKPASS
+    script (e.g. a 1Password wrapper)."""
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "rendered"
+        out.mkdir()
+        # The CLI checks os.environ for GIT_ASKPASS (not the click
+        # runner's injected env), so we set it via monkeypatch in
+        # the test process's env. This models the real-world
+        # scenario where the user has GIT_ASKPASS exported in
+        # their shell.
+        custom_askpass = "/usr/local/bin/my-credential-helper.sh"
+        with patch.dict(os.environ, {"GIT_ASKPASS": custom_askpass}, clear=False), \
+             patch("servicectl.github_api.create_org_repo") as mock_create, \
+             patch("subprocess.run") as mock_subprocess:
+            mock_create.return_value = FAKE_REPO_RESPONSE
+            mock_subprocess.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=b"", stderr=b""
+            )
+            result = runner.invoke(
+                init,
+                [
+                    "my-service", "--template=go-webapi",
+                    "--repo", "SaCScaffolder/my-service",
+                    "--output-dir", str(out),
+                ],
+                env={"GH_TOKEN": "ghp_test_token_for_unit_test_only_xxxxx",
+                     "PATH": os.environ.get("PATH", "")},
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0, result.output
+        push_calls = [
+            c for c in mock_subprocess.call_args_list
+            if c.args and c.args[0] and c.args[0][0:3] == ["git", "-C", c.args[0][2]]
+            and "push" in c.args[0]
+        ]
+        assert len(push_calls) == 1
+        push_env = push_calls[0].kwargs.get("env", {})
+        assert push_env.get("GIT_ASKPASS") == custom_askpass, (
+            f"expected existing GIT_ASKPASS to be preserved, got: {push_env.get('GIT_ASKPASS')!r}"
+        )

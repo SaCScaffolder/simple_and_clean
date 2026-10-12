@@ -58,6 +58,31 @@ console = Console(force_terminal=None, legacy_windows=False)
 err_console = Console(stderr=True, style="bold red")
 
 
+def _write_askpass(token: str) -> str:
+    """Write a temporary GIT_ASKPASS script that echoes the token.
+
+    Git invokes GIT_ASKPASS with one of three arguments and expects
+    the password on stdout. We don't care which argument git passes;
+    we always return the token.
+
+    The caller is responsible for deleting the file after the push
+    (the script contents the token in plaintext). The file is
+    created with mode 0600 on POSIX; on Windows the OS-level mode
+    semantics are looser but the parent directory is the user's
+    temp dir, which is per-user.
+
+    Returns the path to the script.
+    """
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix="servicectl-askpass-", suffix=".sh")
+    try:
+        os.write(fd, f"#!/bin/sh\necho {token}\n".encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+    return path
+
+
 @click.group()
 @click.version_option(__version__, prog_name="servicectl")
 def main() -> None:
@@ -473,12 +498,43 @@ def init(
             )
             sys.exit(2)
         try:
-            subprocess.run(
-                ["git", "-C", str(created), "push", "-u", "origin", "main"],
-                check=True,
-                capture_output=True,
-            )
-            console.print("  ran      [bold]git push -u origin main[/bold]")
+            # Authenticate the push. On a local dev machine, the user
+            # probably has a credential helper configured. On a CI
+            # runner (like SaCScaffolder/sac's integration test
+            # workflow), there is no helper and no TTY, so we need
+            # an ASKPASS script. We use the token both ways: if
+            # GIT_ASKPASS isn't set, we write a temporary one and
+            # clean it up after the push. If it is already set
+            # (caller-provided), we leave it alone.
+            #
+            # `git -c credential.helper=` clears any inherited
+            # helper so the ASKPASS is what runs.
+            askpass_path: str | None = None
+            if "GIT_ASKPASS" not in os.environ:
+                askpass_path = _write_askpass(token)
+            # Order matters: the literal GIT_ASKPASS key (if we
+            # just wrote one) overrides anything in os.environ, so
+            # our temporary script is the one git sees. The
+            # `os.environ` entries are merged in second so user-set
+            # vars survive (PATH, LANG, etc.).
+            env_for_push = {**os.environ}
+            if askpass_path is not None:
+                env_for_push["GIT_ASKPASS"] = askpass_path
+            try:
+                subprocess.run(
+                    ["git", "-C", str(created), "-c", "credential.helper=",
+                     "push", "-u", "origin", "main"],
+                    check=True,
+                    capture_output=True,
+                    env=env_for_push,
+                )
+                console.print("  ran      [bold]git push -u origin main[/bold]")
+            finally:
+                if askpass_path is not None:
+                    try:
+                        os.unlink(askpass_path)
+                    except OSError:
+                        pass
         except subprocess.CalledProcessError as e:
             stderr = e.stderr.decode(errors='replace').strip() or e.stdout.decode(errors='replace').strip()
             err_console.print(
