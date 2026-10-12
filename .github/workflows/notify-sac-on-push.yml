@@ -226,9 +226,22 @@ jobs:
               wf_path = r.get('path', '')
               title = r.get('display_title', '')
               created = datetime.datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))
+              status = r.get('status', '')
+              conclusion = r.get('conclusion', '')
+              # Only match runs that are still active. Skip cancelled,
+              # completed-success, and completed-failure runs -- those
+              # are typically from a *previous* dispatch (e.g. a
+              # concurrent PR's watcher) that already concluded, or
+              # from a cancelled run that was superseded by a newer
+              # one. Without this filter, the watch step would pick
+              # up a stale `X` (cancelled) or already-finished run
+              # and report failure for a test that's actually still
+              # running on a newer run.
               if 'integration-test-unmodified' in wf_path \
                  and title == 'simple_and_clean-updated' \
-                 and created >= cutoff:
+                 and created >= cutoff \
+                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
+                 and not conclusion:
                   print(r['id'])
                   break
           ")
@@ -237,10 +250,10 @@ jobs:
               echo "Found sac integration-test-unmodified run ${RUN_ID}"
               exit 0
             fi
-            echo "  attempt $i/30: no matching sac run yet, sleeping 5s"
+            echo "  attempt $i/30: no matching sac run yet (or matched run was already terminal), sleeping 5s"
             sleep 5
           done
-          echo "::error::No sac integration-test-unmodified run appeared within 150s of dispatch"
+          echo "::error::No active sac integration-test-unmodified run appeared within 150s of dispatch"
           exit 1
 
       - name: Watch sac integration-test-unmodified run to completion
@@ -329,7 +342,9 @@ jobs:
                  and 'integration-test-pr-cleanup' not in wf_path \
                  and 'integration-test-pr-sweeper' not in wf_path \
                  and title == 'simple_and_clean-updated' \
-                 and created >= cutoff:
+                 and created >= cutoff \
+                 and r.get('status', '') in ('queued', 'in_progress', 'waiting', 'pending') \
+                 and not r.get('conclusion'):
                   print(r['id'])
                   break
           ")
@@ -338,10 +353,10 @@ jobs:
               echo "Found sac integration-test-pr run ${RUN_ID}"
               exit 0
             fi
-            echo "  attempt $i/30: no matching sac PR-variant run yet, sleeping 5s"
+            echo "  attempt $i/30: no matching sac PR-variant run yet (or matched run was already terminal), sleeping 5s"
             sleep 5
           done
-          echo "::error::No sac integration-test-pr run appeared within 150s of dispatch"
+          echo "::error::No active sac integration-test-pr run appeared within 150s of dispatch"
           exit 1
 
       - name: Watch sac integration-test-pr run to completion
