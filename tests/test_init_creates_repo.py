@@ -449,3 +449,76 @@ def test_init_creates_repo_respects_existing_git_askpass():
         assert push_env.get("GIT_ASKPASS") == custom_askpass, (
             f"expected existing GIT_ASKPASS to be preserved, got: {push_env.get('GIT_ASKPASS')!r}"
         )
+
+
+class TestAskpassPermissions:
+    """Pins the fix for the 2026-10-12 askpass permission bug.
+
+    Bug history
+    -----------
+    The `_write_askpass` helper wrote the temporary askpass script
+    with mode 0600 (read+write, no execute). On Linux CI runners
+    (GitHub Actions Ubuntu 24.04), git invokes the askpass via
+    `execve()`, which requires the execute bit. The 0600 mode
+    caused every `simple_and_clean-updated` integration test to
+    fail with:
+
+        fatal: cannot exec '/tmp/servicectl-askpass-XXXX.sh':
+        Permission denied
+
+    Symptom: 100% failure rate on the post-merge canary
+    (`simple_and_clean-updated` repository_dispatch event),
+    0% failure rate on the PR variant (which doesn't go through
+    the `--repo` flow because it uses a fixture repo with the
+    remote pre-configured).
+
+    Fix: chmod 0700 (rwx------). On POSIX this is the standard
+    mode for a private executable. On Windows, `os.chmod` is a
+    no-op for the execute bit but git's Windows code path uses
+    `CreateProcess` with the file extension, so it doesn't need
+    the bit anyway.
+    """
+
+    def test_askpass_is_executable_on_posix(self):
+        """The file must have the execute bit set so git can execve() it."""
+        import os
+        import sys
+        from servicectl.cli import _write_askpass
+
+        if sys.platform == "win32":
+            pytest.skip("chmod execute-bit semantics differ on Windows")
+
+        path = _write_askpass("ghp_test_token_for_unit_test_only_xxxxx")
+        try:
+            st = os.stat(path)
+            mode = st.st_mode & 0o777
+            # 0o111 is the execute bits for owner/group/other.
+            # We only require the OWNER execute bit (0o100).
+            assert mode & 0o100, (
+                f"askpass script {path} is not executable: mode={oct(mode)}. "
+                f"On Linux, git invokes the askpass via execve() and requires "
+                f"the execute bit. Use mode 0700, not 0600."
+            )
+            # And it should still be private (not group/world readable).
+            assert not (mode & 0o077), (
+                f"askpass script {path} is readable by group/other: mode={oct(mode)}. "
+                f"Use mode 0700 to keep the token private."
+            )
+        finally:
+            os.unlink(path)
+
+    def test_askpass_contents_echo_token(self):
+        """The script body should be `#!/bin/sh\\necho <token>\\n`."""
+        import os
+        from servicectl.cli import _write_askpass
+
+        token = "ghp_test_token_for_unit_test_only_xxxxx"
+        path = _write_askpass(token)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                contents = f.read()
+            assert contents.startswith("#!/bin/sh\n")
+            # The token must be on the second line, echo'd.
+            assert f"echo {token}" in contents
+        finally:
+            os.unlink(path)
