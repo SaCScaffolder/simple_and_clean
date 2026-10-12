@@ -337,7 +337,7 @@ def test_init_repo_no_push_skips_git_push():
         f"expected the skip notice in the success output, got:\n{result.output}"
     )
 
-
+ 
 def test_init_creates_repo_warns_when_git_daemon_times_out():
     """If the git daemon never becomes visible, init surfaces a
     warning (not a fatal error) and proceeds with the push anyway.
