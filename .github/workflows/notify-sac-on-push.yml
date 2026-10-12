@@ -44,6 +44,21 @@ name: Notify sac on push
 #   - workflow_dispatch               (manual re-fire from the
 #                                     Actions tab while iterating)
 #
+# Yellow-while-waiting semantics for PR checks:
+#   The doc (C:\Users\henry\source\repos\instructions.txt) requires
+#   that the simple_and_clean PR check stay "yellow" (pending) while
+#   the SAC integration test is in flight, and only go red on actual
+#   failure -- not on the integration test taking a long time. The
+#   PR check's green/red is determined by:
+#     1. The commit status (set explicitly via the GitHub Status API
+#        by the `Set pending status` and `Set final status` steps).
+#     2. The workflow run's own success/failure (added automatically
+#        by GitHub for any workflow that runs in a PR's check suite).
+#   For push events, only #2 applies (pushes don't have a PR check
+#   list). The status steps are no-ops on push events because the
+#   SHA is the same as the commit the workflow is already reporting
+#   on.
+#
 # Secrets required in SaCScaffolder/simple_and_clean:
 #   SAC_DISPATCH_APP_ID       — numeric App ID (5230297)
 #   SAC_DISPATCH_APP_PEM      — .pem file contents from the App's
@@ -54,7 +69,7 @@ name: Notify sac on push
 # workflow has its own secret set, and so that rotating one doesn't
 # affect the other.
 
-on:
+"on":
   push:
     branches: [main]
   pull_request:
@@ -73,6 +88,46 @@ jobs:
           app-id: ${{ secrets.SAC_DISPATCH_APP_ID }}
           private-key: ${{ secrets.SAC_DISPATCH_APP_PEM }}
           owner: SaCScaffolder
+
+      - name: Set pending status on PR head (yellow while waiting)
+        # For pull_request events: set a `pending` commit status on
+        # the PR's head SHA. This makes the simple_and_clean PR check
+        # show yellow (with a "waiting on SAC integration test"
+        # description) while the SAC run is in flight. The status
+        # is updated to `success` or `failure` by the final step.
+        #
+        # For push events: this is a no-op (we still set the status,
+        # but the SHA is the same as `github.sha` which the workflow
+        # already reports on via its own run status, and pushes
+        # don't have a PR check list to display the status on).
+        #
+        # The status `context` is `simple_and_clean / sac-integration-test`
+        # so it shows up grouped with the simple_and_clean PR's other
+        # checks. We POST to /repos/{owner}/{repo}/statuses/{sha} with
+        # the installation token. The App's installation has
+        # `contents: write` which is sufficient for the status API
+        # (status writes don't require a separate scope; any token
+        # that can read the repo can write statuses on its commits).
+        if: github.event_name == 'pull_request'
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "::add-mask::${TOKEN}"
+          http_code=$(curl -sS -o /tmp/pending_body.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            -d "{\"state\":\"pending\",\"description\":\"Waiting for SAC integration test to complete (max ~10 min)\",\"context\":\"simple_and_clean / sac-integration-test\"}" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${SHA}")
+          if [ "${http_code}" != "201" ]; then
+            echo "::warning::Failed to set pending status (HTTP ${http_code}); the PR check will still report via the workflow run's own status"
+            cat /tmp/pending_body.json || true
+          else
+            echo "Set pending status on ${SHA}"
+          fi
 
       - name: POST repository_dispatch to sac
         id: dispatch
@@ -189,6 +244,7 @@ jobs:
           exit 1
 
       - name: Watch sac integration-test-unmodified run to completion
+        id: watch
         env:
           TOKEN: ${{ steps.app-token.outputs.token }}
           RUN_ID: ${{ steps.find-run.outputs.run_id }}
@@ -198,3 +254,41 @@ jobs:
             --repo SaCScaffolder/sac \
             --exit-status
           echo "::notice::sac integration-test-unmodified passed for ${{ github.sha }}"
+
+      - name: Set final status on PR head (green or red)
+        # Updates the pending status set at the start of the workflow
+        # to `success` or `failure` based on the watch result. The
+        # `if: always()` ensures this runs even if the watch step
+        # failed (so we update the status to `failure` and don't
+        # leave the PR check stuck on yellow).
+        #
+        # The status `context` matches the one used in the
+        # `Set pending status` step, so this is an update of the
+        # same status, not a new one.
+        if: always() && github.event_name == 'pull_request'
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "::add-mask::${TOKEN}"
+          if [ "${{ steps.watch.outcome }}" = "success" ] || [ "${{ steps.dispatch.outcome }}" = "success" ]; then
+            STATE="success"
+            DESCRIPTION="SAC integration test passed"
+          else
+            STATE="failure"
+            DESCRIPTION="SAC integration test failed; see the workflow run for details"
+          fi
+          http_code=$(curl -sS -o /tmp/final_body.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            -d "{\"state\":\"${STATE}\",\"description\":\"${DESCRIPTION}\",\"context\":\"simple_and_clean / sac-integration-test\"}" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${SHA}")
+          if [ "${http_code}" != "201" ]; then
+            echo "::warning::Failed to set final status (HTTP ${http_code})"
+            cat /tmp/final_body.json || true
+          else
+            echo "Set final status (${STATE}) on ${SHA}"
+          fi
