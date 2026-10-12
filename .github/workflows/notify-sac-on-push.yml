@@ -432,7 +432,9 @@ jobs:
               created = datetime.datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))
               if 'integration-test-pr-unmodified' in wf_path \
                  and title == 'simple_and_clean-updated' \
-                 and created >= cutoff:
+                 and created >= cutoff \
+                 and r.get('status', '') in ('queued', 'in_progress', 'waiting', 'pending') \
+                 and not r.get('conclusion'):
                   print(r['id'])
                   break
           ")
@@ -441,10 +443,10 @@ jobs:
               echo "Found sac integration-test-pr-unmodified run ${RUN_ID}"
               exit 0
             fi
-            echo "  attempt $i/30: no matching sac unmodified PR-variant run yet, sleeping 5s"
+            echo "  attempt $i/30: no matching sac unmodified PR-variant run yet (or matched run was already terminal), sleeping 5s"
             sleep 5
           done
-          echo "::error::No sac integration-test-pr-unmodified run appeared within 150s of dispatch"
+          echo "::error::No active sac integration-test-pr-unmodified run appeared within 150s of dispatch"
           exit 1
 
       - name: Watch sac integration-test-pr-unmodified run to completion
