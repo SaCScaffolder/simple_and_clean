@@ -416,6 +416,7 @@ jobs:
             if [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ]; then
               echo "run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
               echo "Found sac integration-test-pr run ${RUN_ID}"
+              echo "runs"
               exit 0
             fi
             echo "  attempt $i/30: no matching sac PR-variant run yet (or matched run was already terminal), sleeping 5s"
