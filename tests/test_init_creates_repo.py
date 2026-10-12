@@ -296,6 +296,48 @@ def test_init_repo_private_flag_makes_repo_private():
     assert mock_create.call_args.kwargs["private"] is True
 
 
+def test_init_repo_no_push_without_repo_is_rejected():
+    """--repo-no-push is only meaningful with --repo (it's the
+    suppression flag for the only push that --repo does)."""
+    result, _, _ = _run_init(
+        args=["my-service", "--template=go-webapi", "--repo-no-push"],
+        env={"GH_TOKEN": "ghp_test_token_for_unit_test_only_xxxxx"},
+    )
+    assert result.exit_code == 2, f"expected exit 2, got {result.exit_code}"
+    assert "--repo-no-push is only meaningful with --repo" in result.output
+
+
+def test_init_repo_no_push_skips_git_push():
+    """When --repo-no-push is set, init creates the repo and
+    adds it as `origin` but does NOT push. The integration test
+    workflow path uses this so it can cherry-pick fixture
+    commits on top of the SAC baseline before pushing manually.
+    """
+    result, _, mock_subprocess = _run_init(
+        args=[
+            "my-service",
+            "--template=go-webapi",
+            "--repo", "SaCScaffolder/my-service",
+            "--repo-no-push",
+        ],
+        env={"GH_TOKEN": "ghp_test_token_for_unit_test_only_xxxxx"},
+    )
+    assert result.exit_code == 0, result.output
+    # Verify a remote add was called.
+    arg_strs = [" ".join(map(str, c.args[0])) for c in mock_subprocess.call_args_list if c.args]
+    assert any("remote add origin" in s for s in arg_strs), (
+        f"expected `git remote add origin` to be called, got:\n{arg_strs}"
+    )
+    # Verify no push was called.
+    assert not any("push" in s and "origin" in s for s in arg_strs), (
+        f"expected NO `git push` to be called, got:\n{arg_strs}"
+    )
+    # Verify the success panel signals the skip.
+    assert "skipped" in result.output, (
+        f"expected the skip notice in the success output, got:\n{result.output}"
+    )
+
+
 def test_init_creates_repo_warns_when_git_daemon_times_out():
     """If the git daemon never becomes visible, init surfaces a
     warning (not a fatal error) and proceeds with the push anyway.
