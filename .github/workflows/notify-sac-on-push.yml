@@ -439,23 +439,44 @@ jobs:
               echo "::notice::sac integration-test-unmodified passed for ${{ github.sha }}"
               exit 0
             fi
-            # gh run watch returned non-zero. Inspect the run's
-            # conclusion. If cancelled, re-find; if failure,
-            # propagate the real failure. If unknown (the API
-            # hasn't been updated yet), treat as still in-progress
-            # and re-find.
-            CONCLUSION=$(gh api "repos/SaCScaffolder/sac/actions/runs/${RUN_ID}" --jq '.conclusion' 2>/dev/null || echo "unknown")
-            if [ "$CONCLUSION" = "cancelled" ]; then
+            # gh run watch returned non-zero. gh run watch is the
+            # source of truth for the conclusion -- it blocks until
+            # the run reaches a terminal state and exits 0 on success
+            # or non-zero on any failure (including cancellation). The
+            # previous implementation re-checked the conclusion via
+            # `gh api` in a retry loop, but that raced against gh run
+            # watch's own detection: on real failures the API could
+            # lag ~1-3s behind gh run watch, the loop would fall into
+            # its "API lagging, re-finding" branch, hit 6/6 retries,
+            # and propagate a generic "watch retries exhausted" error
+            # instead of the actual failure. We observed this in the
+            # 1e709ed push: the unmodified run completed with failure,
+            # gh run watch --exit-status returned non-zero, the loop
+            # re-checked .conclusion via gh api (still blank), re-found
+            # the same failed run 6 times, and the workflow exited with
+            # "No sac integration-test-unmodified run completed within
+            # 6 watch retries" -- losing the real failure signal.
+            #
+            # The only case where we still want to re-find is when the
+            # run was cancelled mid-watch (e.g. a concurrent dispatch's
+            # concurrency group superseded it) -- a *newer* in-progress
+            # run from the same dispatch may still be alive, and that's
+            # the one we actually want to wait on. Otherwise (real
+            # failure, or cancellation on the final attempt), propagate
+            # immediately. Use `gh run view` rather than `gh api .../
+            # actions/runs/{id}` because the former is a single
+            # endpoint with less lag.
+            CONCLUSION=$(gh run view "${RUN_ID}" --repo SaCScaffolder/sac --json conclusion --jq '.conclusion' 2>/dev/null || echo "unknown")
+            if [ "$CONCLUSION" = "cancelled" ] && [ "$attempt" -lt 6 ]; then
               echo "  run ${RUN_ID} was cancelled, looking for a newer active run"
               sleep 3
               continue
             fi
             if [ -z "$CONCLUSION" ] || [ "$CONCLUSION" = "null" ] || [ "$CONCLUSION" = "unknown" ] || [ "$CONCLUSION" = "" ]; then
-              echo "  run ${RUN_ID} conclusion unknown (API may be lagging), re-finding"
-              sleep 3
-              continue
+              echo "  run ${RUN_ID} concluded but conclusion could not be read; propagating as failure"
+            else
+              echo "  run ${RUN_ID} concluded with ${CONCLUSION}, propagating"
             fi
-            echo "  run ${RUN_ID} concluded with ${CONCLUSION}, propagating failure"
             exit 1
           done
           echo "::error::No sac integration-test-unmodified run completed within 6 watch retries"
@@ -561,22 +582,48 @@ jobs:
               continue
             fi
             echo "  watch attempt $attempt/6: watching sac modified run ${RUN_ID}"
-            if GH_TOKEN="***" gh run watch "${RUN_ID}" --repo SaCScaffolder/sac --exit-status; then
+            if GH_TOKEN="${TOKEN}" gh run watch "${RUN_ID}" --repo SaCScaffolder/sac --exit-status; then
               echo "::notice::sac integration-test-modified passed for ${{ github.sha }}"
               exit 0
             fi
-            CONCLUSION=$(gh api "repos/SaCScaffolder/sac/actions/runs/${RUN_ID}" --jq '.conclusion' 2>/dev/null || echo "unknown")
-            if [ "$CONCLUSION" = "cancelled" ]; then
+            # gh run watch returned non-zero. gh run watch is the
+            # source of truth for the conclusion -- it blocks until
+            # the run reaches a terminal state and exits 0 on success
+            # or non-zero on any failure (including cancellation). The
+            # previous implementation re-checked the conclusion via
+            # `gh api` in a retry loop, but that raced against gh run
+            # watch's own detection: on real failures the API could
+            # lag ~1-3s behind gh run watch, the loop would fall into
+            # its "API lagging, re-finding" branch, hit 6/6 retries,
+            # and propagate a generic "watch retries exhausted" error
+            # instead of the actual failure. We observed this in the
+            # 1e709ed push: the unmodified run completed with failure,
+            # gh run watch --exit-status returned non-zero, the loop
+            # re-checked .conclusion via gh api (still blank), re-found
+            # the same failed run 6 times, and the workflow exited with
+            # "No sac integration-test-unmodified run completed within
+            # 6 watch retries" -- losing the real failure signal.
+            #
+            # The only case where we still want to re-find is when the
+            # run was cancelled mid-watch (e.g. a concurrent dispatch's
+            # concurrency group superseded it) -- a *newer* in-progress
+            # run from the same dispatch may still be alive, and that's
+            # the one we actually want to wait on. Otherwise (real
+            # failure, or cancellation on the final attempt), propagate
+            # immediately. Use `gh run view` rather than `gh api .../
+            # actions/runs/{id}` because the former is a single
+            # endpoint with less lag.
+            CONCLUSION=$(gh run view "${RUN_ID}" --repo SaCScaffolder/sac --json conclusion --jq '.conclusion' 2>/dev/null || echo "unknown")
+            if [ "$CONCLUSION" = "cancelled" ] && [ "$attempt" -lt 6 ]; then
               echo "  run ${RUN_ID} was cancelled, looking for a newer active run"
               sleep 3
               continue
             fi
             if [ -z "$CONCLUSION" ] || [ "$CONCLUSION" = "null" ] || [ "$CONCLUSION" = "unknown" ] || [ "$CONCLUSION" = "" ]; then
-              echo "  run ${RUN_ID} conclusion unknown (API may be lagging), re-finding"
-              sleep 3
-              continue
+              echo "  run ${RUN_ID} concluded but conclusion could not be read; propagating as failure"
+            else
+              echo "  run ${RUN_ID} concluded with ${CONCLUSION}, propagating"
             fi
-            echo "  run ${RUN_ID} concluded with ${CONCLUSION}, propagating failure"
             exit 1
           done
           echo "::error::No sac integration-test-modified run completed within 6 watch retries"
@@ -729,18 +776,44 @@ jobs:
               echo "::notice::sac integration-test-pr passed for ${{ github.sha }}"
               exit 0
             fi
-            CONCLUSION=$(gh api "repos/SaCScaffolder/sac/actions/runs/${RUN_ID}" --jq '.conclusion' 2>/dev/null || echo "unknown")
-            if [ "$CONCLUSION" = "cancelled" ]; then
+            # gh run watch returned non-zero. gh run watch is the
+            # source of truth for the conclusion -- it blocks until
+            # the run reaches a terminal state and exits 0 on success
+            # or non-zero on any failure (including cancellation). The
+            # previous implementation re-checked the conclusion via
+            # `gh api` in a retry loop, but that raced against gh run
+            # watch's own detection: on real failures the API could
+            # lag ~1-3s behind gh run watch, the loop would fall into
+            # its "API lagging, re-finding" branch, hit 6/6 retries,
+            # and propagate a generic "watch retries exhausted" error
+            # instead of the actual failure. We observed this in the
+            # 1e709ed push: the unmodified run completed with failure,
+            # gh run watch --exit-status returned non-zero, the loop
+            # re-checked .conclusion via gh api (still blank), re-found
+            # the same failed run 6 times, and the workflow exited with
+            # "No sac integration-test-unmodified run completed within
+            # 6 watch retries" -- losing the real failure signal.
+            #
+            # The only case where we still want to re-find is when the
+            # run was cancelled mid-watch (e.g. a concurrent dispatch's
+            # concurrency group superseded it) -- a *newer* in-progress
+            # run from the same dispatch may still be alive, and that's
+            # the one we actually want to wait on. Otherwise (real
+            # failure, or cancellation on the final attempt), propagate
+            # immediately. Use `gh run view` rather than `gh api .../
+            # actions/runs/{id}` because the former is a single
+            # endpoint with less lag.
+            CONCLUSION=$(gh run view "${RUN_ID}" --repo SaCScaffolder/sac --json conclusion --jq '.conclusion' 2>/dev/null || echo "unknown")
+            if [ "$CONCLUSION" = "cancelled" ] && [ "$attempt" -lt 6 ]; then
               echo "  run ${RUN_ID} was cancelled, looking for a newer active run"
               sleep 3
               continue
             fi
             if [ -z "$CONCLUSION" ] || [ "$CONCLUSION" = "null" ] || [ "$CONCLUSION" = "unknown" ] || [ "$CONCLUSION" = "" ]; then
-              echo "  run ${RUN_ID} conclusion unknown (API may be lagging), re-finding"
-              sleep 3
-              continue
+              echo "  run ${RUN_ID} concluded but conclusion could not be read; propagating as failure"
+            else
+              echo "  run ${RUN_ID} concluded with ${CONCLUSION}, propagating"
             fi
-            echo "  run ${RUN_ID} concluded with ${CONCLUSION}, propagating failure"
             exit 1
           done
           echo "::error::No sac integration-test-pr run completed within 6 watch retries"
@@ -875,18 +948,44 @@ jobs:
               echo "::notice::sac integration-test-pr-unmodified passed for ${{ github.sha }}"
               exit 0
             fi
-            CONCLUSION=$(gh api "repos/SaCScaffolder/sac/actions/runs/${RUN_ID}" --jq '.conclusion' 2>/dev/null || echo "unknown")
-            if [ "$CONCLUSION" = "cancelled" ]; then
+            # gh run watch returned non-zero. gh run watch is the
+            # source of truth for the conclusion -- it blocks until
+            # the run reaches a terminal state and exits 0 on success
+            # or non-zero on any failure (including cancellation). The
+            # previous implementation re-checked the conclusion via
+            # `gh api` in a retry loop, but that raced against gh run
+            # watch's own detection: on real failures the API could
+            # lag ~1-3s behind gh run watch, the loop would fall into
+            # its "API lagging, re-finding" branch, hit 6/6 retries,
+            # and propagate a generic "watch retries exhausted" error
+            # instead of the actual failure. We observed this in the
+            # 1e709ed push: the unmodified run completed with failure,
+            # gh run watch --exit-status returned non-zero, the loop
+            # re-checked .conclusion via gh api (still blank), re-found
+            # the same failed run 6 times, and the workflow exited with
+            # "No sac integration-test-unmodified run completed within
+            # 6 watch retries" -- losing the real failure signal.
+            #
+            # The only case where we still want to re-find is when the
+            # run was cancelled mid-watch (e.g. a concurrent dispatch's
+            # concurrency group superseded it) -- a *newer* in-progress
+            # run from the same dispatch may still be alive, and that's
+            # the one we actually want to wait on. Otherwise (real
+            # failure, or cancellation on the final attempt), propagate
+            # immediately. Use `gh run view` rather than `gh api .../
+            # actions/runs/{id}` because the former is a single
+            # endpoint with less lag.
+            CONCLUSION=$(gh run view "${RUN_ID}" --repo SaCScaffolder/sac --json conclusion --jq '.conclusion' 2>/dev/null || echo "unknown")
+            if [ "$CONCLUSION" = "cancelled" ] && [ "$attempt" -lt 6 ]; then
               echo "  run ${RUN_ID} was cancelled, looking for a newer active run"
               sleep 3
               continue
             fi
             if [ -z "$CONCLUSION" ] || [ "$CONCLUSION" = "null" ] || [ "$CONCLUSION" = "unknown" ] || [ "$CONCLUSION" = "" ]; then
-              echo "  run ${RUN_ID} conclusion unknown (API may be lagging), re-finding"
-              sleep 3
-              continue
+              echo "  run ${RUN_ID} concluded but conclusion could not be read; propagating as failure"
+            else
+              echo "  run ${RUN_ID} concluded with ${CONCLUSION}, propagating"
             fi
-            echo "  run ${RUN_ID} concluded with ${CONCLUSION}, propagating failure"
             exit 1
           done
           echo "::error::No sac integration-test-pr-unmodified run completed within 6 watch retries"
