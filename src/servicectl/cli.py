@@ -10,6 +10,7 @@ Run `servicectl init --help` for the full flag list.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +20,9 @@ from rich.console import Console
 from rich.panel import Panel
 
 from . import __version__
+from . import github_api
 from .doctor import (
+
     EXIT_ERROR,
     EXIT_OK,
     EXIT_WARN,
@@ -161,6 +164,9 @@ def main() -> None:
 @click.option("--no-git", "no_git", is_flag=True, help="Skip `git init` after scaffolding.")
 @click.option("--no-readme", "no_readme", is_flag=True, help="Skip README generation (not recommended).")
 @click.option("--git-remote", "git_remote", type=str, default=None, help="HTTPS URL of a git remote to add as `origin` and push the initial commit to. Requires --no-git NOT to be set. Must start with https://.")
+@click.option("--repo", "repo", type=str, default=None, help="Create the GitHub repo as part of init. Format: OWNER/NAME. After the local scaffold and initial commit, init POSTs to GitHub to create the empty repo, then adds it as `origin` and pushes. Mutually exclusive with --git-remote.")
+@click.option("--repo-private", "repo_private", is_flag=True, help="When used with --repo, create the GitHub repo as private. Default is public.")
+@click.option("--repo-token", "repo_token", type=str, default=None, help="GitHub token to use for the --repo creation. Falls back to $GH_TOKEN, then `gh auth token`. The token is never written to disk by this command.")
 @click.option("--in-place", "in_place", is_flag=True, help="Scaffold directly into --output-dir instead of creating a <name> subfolder. Refuses to overwrite a non-empty directory.")
 @click.option(
     "--from-config",
@@ -194,10 +200,38 @@ def init(
     no_git: bool,
     no_readme: bool,
     git_remote: str | None,
+    repo: str | None,
+    repo_private: bool,
+    repo_token: str | None,
     from_config: Path | None,
     strict_config: bool,
 ) -> None:
     """Scaffold a new service named NAME."""
+    # Early validation that doesn't depend on --from-config merging. The
+    # flag-vs-config merge happens below; the mutually-exclusive and
+    # required-arg checks have to run before that merge so a bad
+    # combo is rejected before the user waits for a config parse.
+    if repo and git_remote:
+        err_console.print(
+            "[bold red]error:[/bold red] --repo and --git-remote are mutually "
+            "exclusive. --repo creates the GitHub repo and pushes to it; "
+            "--git-remote pushes to a repo you've already created. "
+            "Pick one."
+        )
+        sys.exit(2)
+    if repo and no_git:
+        err_console.print(
+            "[bold red]error:[/bold red] --repo requires git (it creates the "
+            "repo, adds it as origin, and pushes). Don't pass --no-git with --repo."
+        )
+        sys.exit(2)
+    if repo_private and not repo:
+        err_console.print(
+            "[bold red]error:[/bold red] --repo-private is only meaningful with "
+            "--repo. It controls the visibility of the GitHub repo being created."
+        )
+        sys.exit(2)
+
     # Merge --from-config JSON values with CLI flags.
     # Precedence (highest first): CLI flag (explicit) > JSON value > CLI default.
     # We use Click's parameter_source API to know which CLI flags were
@@ -327,6 +361,12 @@ def init(
         output_dir = ctx.params["output_dir"]
         in_place = ctx.params["in_place"]
         git_remote = ctx.params["git_remote"]
+        repo = ctx.params["repo"]
+        repo_private = ctx.params["repo_private"]
+        repo_token = ctx.params["repo_token"]
+
+        # (Mutually-exclusive and required-arg validation moved to the top
+        # of init() so it runs even when --from-config isn't used.)
 
         # After merging JSON + defaults, validate that required keys landed.
         # Click's `required=True` only catches missing CLI flags; it doesn't
@@ -366,6 +406,85 @@ def init(
     except ScaffoldError as e:
         err_console.print(f"[bold red]error:[/bold red] {e}")
         sys.exit(2)
+
+    # If --repo was passed, create the GitHub repo and push to it.
+    # This is the "faithful recreation of the user experience" path: a
+    # human running `servicectl init --repo=X/Y` does this in one
+    # command, and the integration test workflow in
+    # SaCScaffolder/sac's `integration-test-modified.yml` bootstrap path
+    # also shells out to this command for the same effect.
+    created_repo_url: str | None = None
+    if repo:
+        from . import github_api  # local import; only needed on this path
+        owner_str, _, name_str = repo.partition("/")
+        if not owner_str or not name_str:
+            err_console.print(
+                f"[bold red]error:[/bold red] --repo must be OWNER/NAME, got {repo!r}"
+            )
+            sys.exit(2)
+        # Token resolution: --repo-token > $GH_TOKEN > `gh auth token`
+        token = repo_token or os.environ.get("GH_TOKEN") or github_api.get_auth_token_from_gh_cli()
+        if not token:
+            err_console.print(
+                "[bold red]error:[/bold red] no GitHub token available for --repo. "
+                "Provide one via:\n"
+                "  --repo-token <PAT>   (explicit, never stored)\n"
+                "  $GH_TOKEN            (env var)\n"
+                "  gh auth login        (then re-run; init will pick up the token via `gh auth token`)\n"
+                "See https://github.com/settings/tokens to mint a PAT. The token needs `repo` scope for the org."
+            )
+            sys.exit(2)
+        # The scaffolded service lives in `created` (a Path). All git
+        # commands run from there.
+        try:
+            response = github_api.create_org_repo(
+                owner_str,
+                name_str,
+                token=token,
+                private=repo_private,
+            )
+        except github_api.GitHubAPIError as e:
+            err_console.print(
+                f"[bold red]error:[/bold red] failed to create GitHub repo {repo}: "
+                f"HTTP {e.status}\n{e.body}"
+            )
+            sys.exit(2)
+        created_repo_url = response.get("html_url") or response.get("clone_url")
+        clone_url = response.get("clone_url")
+        if not clone_url:
+            err_console.print(
+                f"[bold red]error:[/bold red] GitHub created the repo but didn't return a clone_url. Response: {response}"
+            )
+            sys.exit(2)
+        console.print(f"  [bold green]✓[/bold green] created GitHub repo [cyan]{repo}[/cyan]")
+        # Add the newly-created repo as origin and push. Reuse the same
+        # git command pattern as the generator's --git-remote path.
+        try:
+            subprocess.run(
+                ["git", "-C", str(created), "remote", "add", "origin", clone_url],
+                check=True,
+                capture_output=True,
+            )
+            console.print(f"  ran      [bold]git remote add origin[/bold] {clone_url}")
+        except subprocess.CalledProcessError as e:
+            err_console.print(
+                f"[bold red]error:[/bold red] `git remote add origin` failed: "
+                f"{e.stderr.decode(errors='replace')}"
+            )
+            sys.exit(2)
+        try:
+            subprocess.run(
+                ["git", "-C", str(created), "push", "-u", "origin", "main"],
+                check=True,
+                capture_output=True,
+            )
+            console.print("  ran      [bold]git push -u origin main[/bold]")
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr.decode(errors='replace').strip() or e.stdout.decode(errors='replace').strip()
+            err_console.print(
+                f"[bold red]error:[/bold red] `git push -u origin main` failed: {stderr}"
+            )
+            sys.exit(2)
 
     # Build the deploy hint based on the deploy target.
     if deploy_target == "local":
@@ -418,10 +537,24 @@ def init(
             + f"\n"
             f"  coverage:    {coverage_threshold}%\n"
             f"  registry:    {registry}\n"
-            f"  db:          {db}\n\n"
+            f"  db:          {db}\n"
+            + (
+                f"  github:      {created_repo_url}\n"
+                if created_repo_url
+                else ""
+            )
+            + f"\n"
             f"[bold]Next steps:[/bold]\n"
             f"  cd {name}\n"
-            + ("" if no_git else f"  git add . && git commit -m \"feat: scaffold service\"\n  git remote add origin <your-repo-url>\n  git push -u origin main\n")
+            + (
+                ""
+                if no_git
+                else (
+                    ""
+                    if repo
+                    else f"  git add . && git commit -m \"feat: scaffold service\"\n  git remote add origin <your-repo-url>\n  git push -u origin main\n"
+                )
+            )
             + f"  {deploy_hint}",
             title="service scaffolded",
             border_style="green",
