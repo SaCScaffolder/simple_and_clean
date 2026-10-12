@@ -255,6 +255,74 @@ jobs:
             --exit-status
           echo "::notice::sac integration-test-unmodified passed for ${{ github.sha }}"
 
+      - name: Find the resulting sac integration-test-pr run
+        # The PR variant of the modified integration test
+        # (SaCScaffolder/sac/.github/workflows/integration-test-pr.yml)
+        # also fires on the `simple_and_clean-updated` dispatch (it
+        # has both `pull_request` and `repository_dispatch` triggers
+        # after PR #109). The PR variant validates the scaffolder's
+        # idempotency on a per-PR fixture -- different validation
+        # surface than the unmodified test, complementary.
+        #
+        # Same recency-filter pattern as the unmodified find-run:
+        # poll until we find a run newer than dispatch_time - 60s.
+        # Different filter string: this one matches
+        # `integration-test-pr` (no `-unmodified` suffix), so it
+        # doesn't double-match the unmodified run we just watched.
+        id: find-run-pr
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          DISPATCH_MS=${{ steps.dispatch.outputs.dispatch_time_ms }}
+          export CUTOFF_EPOCH=$(( (DISPATCH_MS - 60000) / 1000 ))
+          echo "Cutoff epoch seconds: ${CUTOFF_EPOCH}"
+          for i in $(seq 1 30); do
+            RUN_ID=$(curl -sS \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/SaCScaffolder/sac/actions/runs?event=repository_dispatch&per_page=10" \
+              | python -c "
+          import json, sys, os, datetime
+          runs = json.load(sys.stdin).get('workflow_runs', [])
+          cutoff = datetime.datetime.fromtimestamp(int(os.environ['CUTOFF_EPOCH']), tz=datetime.timezone.utc)
+          for r in runs:
+              wf_path = r.get('path', '')
+              title = r.get('display_title', '')
+              created = datetime.datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))
+              # Match `integration-test-pr` but NOT
+              # `integration-test-pr-cleanup` or `-pr-sweeper` (those
+              # are infrastructure workflows, not the test).
+              if 'integration-test-pr' in wf_path \
+                 and 'integration-test-pr-cleanup' not in wf_path \
+                 and 'integration-test-pr-sweeper' not in wf_path \
+                 and title == 'simple_and_clean-updated' \
+                 and created >= cutoff:
+                  print(r['id'])
+                  break
+          ")
+            if [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ]; then
+              echo "run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+              echo "Found sac integration-test-pr run ${RUN_ID}"
+              exit 0
+            fi
+            echo "  attempt $i/30: no matching sac PR-variant run yet, sleeping 5s"
+            sleep 5
+          done
+          echo "::error::No sac integration-test-pr run appeared within 150s of dispatch"
+          exit 1
+
+      - name: Watch sac integration-test-pr run to completion
+        id: watch-pr
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_ID: ${{ steps.find-run-pr.outputs.run_id }}
+        run: |
+          echo "Watching sac PR-variant run ${RUN_ID}..."
+          GH_TOKEN="${{ steps.app-token.outputs.token }}" gh run watch "${RUN_ID}" \
+            --repo SaCScaffolder/sac \
+            --exit-status
+          echo "::notice::sac integration-test-pr passed for ${{ github.sha }}"
+
       - name: Set final status on PR head (green or red)
         # Updates the pending status set at the start of the workflow
         # to `success` or `failure` based on the watch result. The
@@ -271,7 +339,7 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           echo "::add-mask::${TOKEN}"
-          if [ "${{ steps.watch.outcome }}" = "success" ] || [ "${{ steps.dispatch.outcome }}" = "success" ]; then
+          if [ "${{ steps.watch.outcome }}" = "success" ] && [ "${{ steps.watch-pr.outcome }}" = "success" ] && [ "${{ steps.dispatch.outcome }}" = "success" ]; then
             STATE="success"
             DESCRIPTION="SAC integration test passed"
           else
