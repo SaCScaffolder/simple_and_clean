@@ -140,28 +140,30 @@ jobs:
           owner: SaCScaffolder
 
       - name: Set pending status on PR head (yellow while waiting)
-        # For pull_request events: set a `pending` commit status on
-        # the PR's head SHA. This makes the simple_and_clean PR check
-        # show yellow (with a "waiting on SAC integration test"
-        # description) while the SAC run is in flight. The status
-        # is updated to `success` or `failure` by the final step.
-        #
-        # For push events: this is a no-op (we still set the status,
-        # but the SHA is the same as `github.sha` which the workflow
-        # already reports on via its own run status, and pushes
-        # don't have a PR check list to display the status on).
+        # **Push events only** (the watcher that updates this
+        # status context is the post-merge canary, which is
+        # gated on `push` and does not run for PRs). For PR
+        # events, the PR-variant watchers
+        # (`Set pending status on PR head (PR variant, ...)`)
+        # set their own contexts (`simple_and_clean /
+        # sac-integration-test-pr` and `simple_and_clean /
+        # sac-integration-test-pr-unmodified`). The non-variant
+        # `simple_and_clean / sac-integration-test` context
+        # does not apply to PRs -- there's no watcher that
+        # would ever update it during a PR's lifetime.
         #
         # The status `context` is `simple_and_clean / sac-integration-test`
-        # so it shows up grouped with the simple_and_clean PR's other
-        # checks. We POST to /repos/{owner}/{repo}/statuses/{sha} with
-        # the installation token. The App's installation has
-        # `contents: write` which is sufficient for the status API
-        # (status writes don't require a separate scope; any token
-        # that can read the repo can write statuses on its commits).
-        if: github.event_name == 'pull_request'
+        # so it shows up grouped with the simple_and_clean PR's
+        # other checks. We POST to /repos/{owner}/{repo}/statuses/{sha}
+        # with the installation token. The App's installation
+        # has `contents: write` which is sufficient for the
+        # status API (status writes don't require a separate
+        # scope; any token that can read the repo can write
+        # statuses on its commits).
+        if: github.event_name == 'push'
         env:
           TOKEN: ${{ steps.app-token.outputs.token }}
-          SHA: ${{ github.event.pull_request.head.sha }}
+          SHA: ${{ github.sha }}
         run: |
           echo "::add-mask::${TOKEN}"
           http_code=$(curl -sS -o /tmp/pending_body.json -w '%{http_code}' \
@@ -372,8 +374,7 @@ jobs:
               if 'integration-test-unmodified' in wf_path \
                  and title == 'simple_and_clean-updated' \
                  and created >= cutoff \
-                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not conclusion:
+                 and (status in ('queued', 'in_progress', 'waiting', 'pending') or status == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -424,8 +425,7 @@ jobs:
               if 'integration-test-unmodified' in wf_path \
                  and title == 'simple_and_clean-updated' \
                  and created >= cutoff \
-                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not conclusion:
+                 and (status in ('queued', 'in_progress', 'waiting', 'pending') or status == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -503,8 +503,7 @@ jobs:
                  and 'integration-test-pr-modified' not in wf_path \
                  and title == 'simple_and_clean-updated' \
                  and created >= cutoff \
-                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not conclusion:
+                 and (status in ('queued', 'in_progress', 'waiting', 'pending') or status == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -552,8 +551,7 @@ jobs:
                  and 'integration-test-pr-modified' not in wf_path \
                  and title == 'simple_and_clean-updated' \
                  and created >= cutoff \
-                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not conclusion:
+                 and (status in ('queued', 'in_progress', 'waiting', 'pending') or status == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -672,8 +670,7 @@ jobs:
                  and 'integration-test-pr-sweeper' not in wf_path \
                  and title == 'simple_and_clean-pr' \
                  and created >= cutoff \
-                 and r.get('status', '') in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not r.get('conclusion'):
+                 and (r.get('status', '') in ('queued', 'in_progress', 'waiting', 'pending') or r.get('status', '') == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -718,8 +715,7 @@ jobs:
                  and 'integration-test-pr-sweeper' not in wf_path \
                  and title == 'simple_and_clean-pr' \
                  and created >= cutoff \
-                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not conclusion:
+                 and (status in ('queued', 'in_progress', 'waiting', 'pending') or status == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -822,8 +818,7 @@ jobs:
               if 'integration-test-pr-unmodified' in wf_path \
                  and title == 'simple_and_clean-pr' \
                  and created >= cutoff \
-                 and r.get('status', '') in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not r.get('conclusion'):
+                 and (r.get('status', '') in ('queued', 'in_progress', 'waiting', 'pending') or r.get('status', '') == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -866,8 +861,7 @@ jobs:
               if 'integration-test-pr-unmodified' in wf_path \
                  and title == 'simple_and_clean-pr' \
                  and created >= cutoff \
-                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not conclusion:
+                 and (status in ('queued', 'in_progress', 'waiting', 'pending') or status == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -962,26 +956,26 @@ jobs:
           fi
 
       - name: Set final status on PR head (green or red)
-        # Updates the pending status set at the start of the workflow
-        # to `success` or `failure` based on the watch result. The
-        # `if: always()` ensures this runs even if the watch step
-        # failed (so we update the status to `failure` and don't
-        # leave the PR check stuck on yellow).
+        # **Push events only** -- the corresponding "Set pending
+        # status" step is also push-only, and the watcher that
+        # updates this context is the post-merge canary (which
+        # does not run on PRs). For PRs, the PR-variant
+        # watchers handle their own contexts.
+        #
+        # Updates the pending status set at the start of the
+        # workflow to `success` or `failure` based on the watch
+        # result. The `if: always()` ensures this runs even if
+        # the watch step failed (so we update the status to
+        # `failure` and don't leave the PR check stuck on
+        # yellow).
         #
         # The status `context` matches the one used in the
-        # `Set pending status` step, so this is an update of the
-        # same status, not a new one.
-        #
-        # After the watcher-split change, on a `pull_request` event
-        # the `watch` step is SKIPPED (only the PR-variant watchers
-        # run). We accept `skipped` as equivalent to `success` here
-        # for the unmodified watcher specifically, since its absence
-        # is by design for PR events. The PR-variant watchers
-        # (`watch-pr`, `watch-pr-unmod`) are required to succeed.
-        if: always() && github.event_name == 'pull_request'
+        # `Set pending status` step, so this is an update of
+        # the same status, not a new one.
+        if: always() && github.event_name == 'push'
         env:
           TOKEN: ${{ steps.app-token.outputs.token }}
-          SHA: ${{ github.event.pull_request.head.sha }}
+          SHA: ${{ github.sha }}
         run: |
           echo "::add-mask::${TOKEN}"
           # Accept `skipped` for the unmodified watcher (it's only
