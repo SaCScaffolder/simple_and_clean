@@ -129,3 +129,94 @@ func TestValidTemplate(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildCliArgs pins the contract that buildCliArgs always appends
+// `--no-input` LAST in the argv. This is the regression test for the
+// 2026-10-12 Windows CI failure where servicectl-go.exe on windows-latest
+// (Go 1.22 and Go 1.27) failed at the "Smoke test against the Python CLI"
+// step with `aborted.` -- because the Python CLI's interactive prompt
+// fired on the inherited stdin (which reports isatty() == True on
+// Windows even when no input is available) and then EOF-aborted.
+//
+// Without `--no-input`, servicectl-go is a programmatic invoker: it has
+// no way to answer prompts. Always passing `--no-input` makes its
+// intent explicit and works on every platform.
+//
+// See PR #123 (the prompt feature) and the follow-up fix in this
+// commit for the long story.
+func TestBuildCliArgs(t *testing.T) {
+	cases := []struct {
+		name     string
+		cfg      resolvedConfig
+		wantArgs []string
+	}{
+		{
+			name: "minimal",
+			cfg: resolvedConfig{
+				Name:         "my-svc",
+				Template:     "go-webapi",
+				CI:           "github-actions",
+				Deploy:       "local",
+				AzureRegion:  "eastus",
+				Coverage:     80,
+				Registry:     "ghcr",
+				OutputDir:    ".",
+				NoGit:        false,
+				NoReadme:     false,
+			},
+			wantArgs: []string{
+				"-m", "servicectl", "init", "my-svc",
+				"--template=go-webapi",
+				"--ci=github-actions",
+				"--deploy=local",
+				"--azure-region=eastus",
+				"--coverage=80",
+				"--registry=ghcr",
+				"--output-dir=.",
+				"--no-input", // ALWAYS LAST
+			},
+		},
+		{
+			name: "with no-git and no-readme",
+			cfg: resolvedConfig{
+				Name:         "smoke-svc",
+				Template:     "go-webapi",
+				CI:           "github-actions",
+				Deploy:       "local",
+				AzureRegion:  "eastus",
+				Coverage:     80,
+				Registry:     "ghcr",
+				OutputDir:    "/tmp/smoke",
+				NoGit:        true,
+				NoReadme:     true,
+			},
+			wantArgs: []string{
+				"-m", "servicectl", "init", "smoke-svc",
+				"--template=go-webapi",
+				"--ci=github-actions",
+				"--deploy=local",
+				"--azure-region=eastus",
+				"--coverage=80",
+				"--registry=ghcr",
+				"--output-dir=/tmp/smoke",
+				"--no-git",
+				"--no-readme",
+				"--no-input", // ALWAYS LAST
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildCliArgs(tc.cfg)
+			if !reflect.DeepEqual(got, tc.wantArgs) {
+				t.Errorf("buildCliArgs() = %v\nwant     %v", got, tc.wantArgs)
+			}
+			// Defensive: the LAST element must be --no-input regardless
+			// of any other config variations. If this ever changes,
+			// update the test deliberately -- don't just shuffle.
+			if got[len(got)-1] != "--no-input" {
+				t.Errorf("buildCliArgs() last arg = %q, want --no-input", got[len(got)-1])
+			}
+		})
+	}
+}
