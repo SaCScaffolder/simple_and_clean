@@ -67,11 +67,16 @@ def _write_askpass(token: str) -> str:
 
     The caller is responsible for deleting the file after the push
     (the script contents the token in plaintext). The file is
-    created with mode 0600 on POSIX; on Windows the OS-level mode
-    semantics are looser but the parent directory is the user's
-    temp dir, which is per-user.
+    created with mode 0700 on POSIX (executable by owner only);
+    on Windows the OS-level mode semantics are looser but the
+    parent directory is the user's temp dir, which is per-user.
 
-    Returns the path to the script.
+    Note: 0700 is *required*, not 0600. Git invokes the askpass via
+    `execve()`, which requires the execute bit. Setting 0600
+    (rw only) results in `fatal: cannot exec <path>: Permission
+    denied` on Linux CI runners (GitHub Actions Ubuntu 24.04).
+    That bug broke every `simple_and_clean-updated` integration
+    test for ~3 hours on 2026-10-12 before being caught.
     """
     import tempfile
     fd, path = tempfile.mkstemp(prefix="servicectl-askpass-", suffix=".sh")
@@ -79,7 +84,16 @@ def _write_askpass(token: str) -> str:
         os.write(fd, f"#!/bin/sh\necho {token}\n".encode("utf-8"))
     finally:
         os.close(fd)
-    os.chmod(path, 0o600)
+    # 0700 = rwx------. Owner can read, write, AND execute; nobody
+    # else can do anything. On POSIX this is the standard mode for
+    # a private executable. On Windows, `os.chmod` only really
+    # honors the read-only flag (it doesn't model the execute bit
+    # the way POSIX does), so the chmod is a no-op for the
+    # Windows permission model, but git's Windows code path uses
+    # `CreateProcess` with the file extension (`.sh`) and the
+    # shebang line, not `execve`, so it doesn't need the execute
+    # bit anyway.
+    os.chmod(path, 0o700)
     return path
 
 
