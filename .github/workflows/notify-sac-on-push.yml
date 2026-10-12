@@ -309,10 +309,17 @@ jobs:
             fi
             # gh run watch returned non-zero. Inspect the run's
             # conclusion. If cancelled, re-find; if failure,
-            # propagate the real failure.
+            # propagate the real failure. If unknown (the API
+            # hasn't been updated yet), treat as still in-progress
+            # and re-find.
             CONCLUSION=$(gh api "repos/SaCScaffolder/sac/actions/runs/${RUN_ID}" --jq '.conclusion' 2>/dev/null || echo "unknown")
             if [ "$CONCLUSION" = "cancelled" ]; then
               echo "  run ${RUN_ID} was cancelled, looking for a newer active run"
+              sleep 3
+              continue
+            fi
+            if [ -z "$CONCLUSION" ] || [ "$CONCLUSION" = "null" ] || [ "$CONCLUSION" = "unknown" ] || [ "$CONCLUSION" = "" ]; then
+              echo "  run ${RUN_ID} conclusion unknown (API may be lagging), re-finding"
               sleep 3
               continue
             fi
