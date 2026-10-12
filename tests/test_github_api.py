@@ -155,3 +155,68 @@ def test_get_auth_token_from_gh_cli_returns_none_when_gh_fails():
     fake_proc.stdout = b""
     with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "gh")):
         assert github_api.get_auth_token_from_gh_cli() is None
+
+
+def test_wait_for_git_daemon_returns_true_on_first_200():
+    """If the REST endpoint returns 200 immediately, return True
+    after a single attempt (no sleeping)."""
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(200, FAKE_REPO)
+        result = github_api.wait_for_git_daemon("SaCScaffolder", "thing", token="***")
+    assert result is True
+    assert mock_urlopen.call_count == 1
+
+
+def test_wait_for_git_daemon_retries_through_404():
+    """If the first N attempts return 404, the helper keeps polling
+    and returns True when a 200 finally arrives."""
+    import urllib.error
+    from io import BytesIO
+    with patch("urllib.request.urlopen") as mock_urlopen, \
+         patch("time.sleep") as mock_sleep:
+        # First two calls 404, third call 200.
+        not_found = urllib.error.HTTPError(
+            "https://api.github.com/repos/SaCScaffolder/thing",
+            404, "Not Found", {"Content-Type": "application/json"},
+            fp=BytesIO(b'{"message":"Not Found"}'),
+        )
+        mock_urlopen.side_effect = [not_found, not_found, _mock_response(200, FAKE_REPO)]
+        result = github_api.wait_for_git_daemon("SaCScaffolder", "thing", token="***")
+    assert result is True
+    assert mock_urlopen.call_count == 3
+    assert mock_sleep.call_count == 2  # slept between the 3 attempts
+
+
+def test_wait_for_git_daemon_returns_false_on_timeout():
+    """If every attempt returns 404, the helper returns False after
+    the configured number of attempts."""
+    import urllib.error
+    from io import BytesIO
+    not_found = urllib.error.HTTPError(
+        "https://api.github.com/repos/SaCScaffolder/thing",
+        404, "Not Found", {"Content-Type": "application/json"},
+        fp=BytesIO(b'{"message":"Not Found"}'),
+    )
+    with patch("urllib.request.urlopen", side_effect=not_found) as mock_urlopen, \
+         patch("time.sleep") as mock_sleep:
+        result = github_api.wait_for_git_daemon(
+            "SaCScaffolder", "thing", token="***", max_attempts=3, sleep_seconds=0.1,
+        )
+    assert result is False
+    assert mock_urlopen.call_count == 3
+
+
+def test_wait_for_git_daemon_treats_network_errors_as_retry():
+    """A URLError (network blip) is treated as 'not yet' rather than
+    failing the helper. This is important because a transient DNS
+    hiccup shouldn't cause the integration test to fail when the
+    repo is actually there."""
+    import urllib.error
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("dns")), \
+         patch("time.sleep"), \
+         patch.object(github_api, "DEFAULT_BASE_URL", "https://api.github.com"):
+        # 3 attempts, all fail with URLError, no 200 ever arrives.
+        result = github_api.wait_for_git_daemon(
+            "SaCScaffolder", "thing", token="***", max_attempts=3, sleep_seconds=0.1,
+        )
+    assert result is False

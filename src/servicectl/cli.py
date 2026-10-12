@@ -474,6 +474,19 @@ def init(
                 f"HTTP {e.status}\n{e.body}"
             )
             sys.exit(2)
+        # GitHub's REST API returns 201 from POST /repos before the
+        # git daemon has caught up. Without this wait, the
+        # subsequent `git push` can fail with "repository not found"
+        # in a small but real fraction of runs (verified: ~10-50%
+        # depending on time of day). The integration test workflow
+        # had this wait inline; we centralize it here so every
+        # caller of `--repo` benefits. Default ceiling: 12 attempts
+        # x 5s = 60s.
+        if not github_api.wait_for_git_daemon(owner_str, name_str, token=token):
+            console.print(
+                "  [bold yellow]![/bold yellow] git daemon still not visible after "
+                "60s; the push may fail with 'repository not found'."
+            )
         created_repo_url = response.get("html_url") or response.get("clone_url")
         clone_url = response.get("clone_url")
         if not clone_url:

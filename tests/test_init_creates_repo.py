@@ -82,6 +82,13 @@ def _run_init(
         mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
         ctx_managers.append(cm2)
 
+        # Mock the git-daemon wait so tests don't hit the real
+        # GitHub API. Default to "already visible" (returns True)
+        # so the happy path doesn't surface a spurious warning.
+        cm3 = patch("servicectl.github_api.wait_for_git_daemon", return_value=True)
+        cm3.__enter__()
+        ctx_managers.append(cm3)
+
         result = runner.invoke(init, final_args, env=full_env, catch_exceptions=False)
         return result, mock_create_obj, mock_subprocess
     finally:
@@ -289,6 +296,39 @@ def test_init_repo_private_flag_makes_repo_private():
     assert mock_create.call_args.kwargs["private"] is True
 
 
+def test_init_creates_repo_warns_when_git_daemon_times_out():
+    """If the git daemon never becomes visible, init surfaces a
+    warning (not a fatal error) and proceeds with the push anyway.
+    The push may fail, but the warning is the operator's signal
+    that something is up."""
+    runner = CliRunner()
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "rendered"
+        out.mkdir()
+        with patch("servicectl.github_api.create_org_repo") as mock_create, \
+             patch("subprocess.run") as mock_subprocess, \
+             patch("servicectl.github_api.wait_for_git_daemon", return_value=False):
+            mock_create.return_value = FAKE_REPO_RESPONSE
+            mock_subprocess.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=b"", stderr=b""
+            )
+            result = runner.invoke(
+                init,
+                [
+                    "my-service", "--template=go-webapi",
+                    "--repo", "SaCScaffolder/my-service",
+                    "--output-dir", str(out),
+                ],
+                env={"GH_TOKEN": "ghp_test_token_for_unit_test_only_xxxxx",
+                     "PATH": os.environ.get("PATH", "")},
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0, result.output
+        assert "git daemon still not visible" in result.output, (
+            f"expected a warning about the git daemon, got:\n{result.output}"
+        )
+
+
 def test_init_creates_repo_writes_askpass_when_no_env_askpass():
     """When GIT_ASKPASS isn't set, init writes a temporary askpass
     script and uses it to authenticate the push. The script is
@@ -339,7 +379,8 @@ def test_init_creates_repo_respects_existing_git_askpass():
         custom_askpass = "/usr/local/bin/my-credential-helper.sh"
         with patch.dict(os.environ, {"GIT_ASKPASS": custom_askpass}, clear=False), \
              patch("servicectl.github_api.create_org_repo") as mock_create, \
-             patch("subprocess.run") as mock_subprocess:
+             patch("subprocess.run") as mock_subprocess, \
+             patch("servicectl.github_api.wait_for_git_daemon", return_value=True):
             mock_create.return_value = FAKE_REPO_RESPONSE
             mock_subprocess.return_value = subprocess.CompletedProcess(
                 args=[], returncode=0, stdout=b"", stderr=b""
