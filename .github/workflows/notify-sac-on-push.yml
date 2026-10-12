@@ -465,6 +465,11 @@ jobs:
               sleep 3
               continue
             fi
+            if [ -z "$CONCLUSION" ] || [ "$CONCLUSION" = "null" ] || [ "$CONCLUSION" = "unknown" ] || [ "$CONCLUSION" = "" ]; then
+              echo "  run ${RUN_ID} conclusion unknown (API may be lagging), re-finding"
+              sleep 3
+              continue
+            fi
             echo "  run ${RUN_ID} concluded with ${CONCLUSION}, propagating failure"
             exit 1
           done
