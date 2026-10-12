@@ -168,21 +168,7 @@ func runInit(rawArgs []string) error {
 	}
 
 	// Build args for the Python CLI. Mirror the SDK's buildArgs exactly.
-	cliArgs := []string{"-m", "servicectl", "init", cfg.Name,
-		"--template=" + cfg.Template,
-		"--ci=" + cfg.CI,
-		"--deploy=" + cfg.Deploy,
-		"--azure-region=" + cfg.AzureRegion,
-		fmt.Sprintf("--coverage=%d", cfg.Coverage),
-		"--registry=" + cfg.Registry,
-		"--output-dir=" + cfg.OutputDir,
-	}
-	if cfg.NoGit {
-		cliArgs = append(cliArgs, "--no-git")
-	}
-	if cfg.NoReadme {
-		cliArgs = append(cliArgs, "--no-readme")
-	}
+	cliArgs := buildCliArgs(cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -281,4 +267,40 @@ func splitName(rawArgs []string) (string, []string) {
 		}
 	}
 	return "", rawArgs
+}
+
+// buildCliArgs constructs the argv to pass to `python -m servicectl init`.
+//
+// Always appends `--no-input` so the Python CLI never attempts an
+// interactive prompt. servicectl-go is a programmatic invoker -- it
+// has no way to answer prompts, and on Windows runners the inherited
+// stdin can report isatty() == True even when no input is available,
+// which makes click.prompt fire and then EOF-abort, leaving us with
+// the "aborted." message and a non-zero exit code. Verified: 100%
+// failure rate on Windows CI for both Go 1.22 and Go 1.27 after
+// PR #123 landed.
+//
+// Always append `--no-input` LAST so it overrides any earlier flag
+// (defensive: in case some upstream caller adds a prompt-friendly
+// flag and forgets to remove it).
+func buildCliArgs(cfg resolvedConfig) []string {
+	args := []string{
+		"-m", "servicectl", "init", cfg.Name,
+		"--template=" + cfg.Template,
+		"--ci=" + cfg.CI,
+		"--deploy=" + cfg.Deploy,
+		"--azure-region=" + cfg.AzureRegion,
+		fmt.Sprintf("--coverage=%d", cfg.Coverage),
+		"--registry=" + cfg.Registry,
+		"--output-dir=" + cfg.OutputDir,
+	}
+	if cfg.NoGit {
+		args = append(args, "--no-git")
+	}
+	if cfg.NoReadme {
+		args = append(args, "--no-readme")
+	}
+	// Always last: tells the Python CLI to never prompt.
+	args = append(args, "--no-input")
+	return args
 }
