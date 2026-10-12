@@ -164,16 +164,39 @@ jobs:
       # (https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
       # The org's "Workflow permissions" setting must be "Read and
       # write" for GITHUB_TOKEN to carry that scope.
+      #
+      # Fallback: if the SAC_GHCR_PUBLISH_TOKEN secret is set, use it
+      # instead of GITHUB_TOKEN. This is a classic PAT with
+      # `packages: write` at the org level, used to push GHCR images
+      # for repos whose own GITHUB_TOKEN cannot write to the
+      # required package namespace (e.g. when a previous run of a
+      # different repo created an org-namespace package that the
+      # current repo's GITHUB_TOKEN doesn't have delete:packages
+      # for). The fallback is a no-op when the secret is unset --
+      # `secrets.X` evaluates to an empty string for unset secrets,
+      # and `||` falls through to GITHUB_TOKEN. See PR #110 (the
+      # GHCR permission_denied incident) for the long form.
       - name: Log in to {{ registry_hostname }}
         uses: docker/login-action@v3
         with:
           registry: {{ registry_hostname }}
           username: {% raw %}${{ github.actor }}{% endraw %}
-          password: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
+          password: {% raw %}${{ secrets.SAC_GHCR_PUBLISH_TOKEN || secrets.GITHUB_TOKEN }}{% endraw %}
       - name: "Pre-flight: check for stale mislinked GHCR package"
-        if: {% raw %}${{ env.IMAGE_NAME }}{% endraw %}.startsWith('ghcr.io/')
+        # Use the startsWith() function form, not the .startsWith() method
+        # form. GitHub Actions' expression language is not full JavaScript;
+        # the only working form is the bare function call. The method form
+        # was a no-op (always ran the step regardless of ghcr/gar), so
+        # the preflight check was effectively running for GAR builds too --
+        # which is harmless today (the preflight is no-op for non-ghcr
+        # registries) but means the step ran an unnecessary `curl` per
+        # GAR build. Verified: switching to the function form makes the
+        # step conditional on `startsWith(env.IMAGE_NAME, 'ghcr.io/')`
+        # evaluating true, which it does for `ghcr.io/...` images and
+        # not for `*-docker.pkg.dev/...` images.
+        if: {% raw %}startsWith(env.IMAGE_NAME, 'ghcr.io/'){% endraw %}
         env:
-          GH_TOKEN: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
+          GH_TOKEN: {% raw %}${{ secrets.SAC_GHCR_PUBLISH_TOKEN || secrets.GITHUB_TOKEN }}{% endraw %}
         run: |
           # PR #103: detect a pre-existing org-scoped package that the
           # current repo's GITHUB_TOKEN can't write to. If a *previous*
@@ -302,7 +325,7 @@ jobs:
         with:
           registry: {% raw %}ghcr.io{% endraw %}
           username: {% raw %}${{ github.actor }}{% endraw %}
-          password: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
+          password: {% raw %}${{ secrets.SAC_GHCR_PUBLISH_TOKEN || secrets.GITHUB_TOKEN }}{% endraw %}
       - name: Build and push with semver tags
         uses: docker/build-push-action@v5
         with:
