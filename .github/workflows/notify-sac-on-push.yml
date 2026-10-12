@@ -196,7 +196,7 @@ jobs:
         run: |
           # Compute cutoff as dispatch_time (in ms) minus 60s, in seconds.
           DISPATCH_MS=${{ steps.dispatch.outputs.dispatch_time_ms }}
-          export CUTOFF_EPOCH=$(( (DISPATCH_MS - 60000) / 1000 ))
+          export CUTOFF_EPOCH=$(( (DISPATCH_MS - 900000) / 1000 ))
           echo "Cutoff epoch seconds: ${CUTOFF_EPOCH}"
           # Poll the sac repo's recent repository_dispatch runs until we
           # find one whose display_title matches our event_type AND
