@@ -374,8 +374,7 @@ jobs:
               if 'integration-test-unmodified' in wf_path \
                  and title == 'simple_and_clean-updated' \
                  and created >= cutoff \
-                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not conclusion:
+                 and (status in ('queued', 'in_progress', 'waiting', 'pending') or status == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -426,8 +425,7 @@ jobs:
               if 'integration-test-unmodified' in wf_path \
                  and title == 'simple_and_clean-updated' \
                  and created >= cutoff \
-                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not conclusion:
+                 and (status in ('queued', 'in_progress', 'waiting', 'pending') or status == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -505,8 +503,7 @@ jobs:
                  and 'integration-test-pr-modified' not in wf_path \
                  and title == 'simple_and_clean-updated' \
                  and created >= cutoff \
-                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not conclusion:
+                 and (status in ('queued', 'in_progress', 'waiting', 'pending') or status == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -554,8 +551,7 @@ jobs:
                  and 'integration-test-pr-modified' not in wf_path \
                  and title == 'simple_and_clean-updated' \
                  and created >= cutoff \
-                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not conclusion:
+                 and (status in ('queued', 'in_progress', 'waiting', 'pending') or status == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -674,8 +670,7 @@ jobs:
                  and 'integration-test-pr-sweeper' not in wf_path \
                  and title == 'simple_and_clean-pr' \
                  and created >= cutoff \
-                 and r.get('status', '') in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not r.get('conclusion'):
+                 and (r.get('status', '') in ('queued', 'in_progress', 'waiting', 'pending') or r.get('status', '') == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -720,8 +715,7 @@ jobs:
                  and 'integration-test-pr-sweeper' not in wf_path \
                  and title == 'simple_and_clean-pr' \
                  and created >= cutoff \
-                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not conclusion:
+                 and (status in ('queued', 'in_progress', 'waiting', 'pending') or status == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -824,8 +818,7 @@ jobs:
               if 'integration-test-pr-unmodified' in wf_path \
                  and title == 'simple_and_clean-pr' \
                  and created >= cutoff \
-                 and r.get('status', '') in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not r.get('conclusion'):
+                 and (r.get('status', '') in ('queued', 'in_progress', 'waiting', 'pending') or r.get('status', '') == 'completed')):
                   print(r['id'])
                   break
           ")
@@ -868,8 +861,7 @@ jobs:
               if 'integration-test-pr-unmodified' in wf_path \
                  and title == 'simple_and_clean-pr' \
                  and created >= cutoff \
-                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
-                 and not conclusion:
+                 and (status in ('queued', 'in_progress', 'waiting', 'pending') or status == 'completed')):
                   print(r['id'])
                   break
           ")
