@@ -171,7 +171,18 @@ jobs:
           username: {% raw %}${{ github.actor }}{% endraw %}
           password: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
       - name: "Pre-flight: check for stale mislinked GHCR package"
-        if: {% raw %}${{ env.IMAGE_NAME }}{% endraw %}.startsWith('ghcr.io/')
+        # Use the startsWith() function form, not the .startsWith() method
+        # form. GitHub Actions' expression language is not full JavaScript;
+        # the only working form is the bare function call. The method form
+        # was a no-op (always ran the step regardless of ghcr/gar), so
+        # the preflight check was effectively running for GAR builds too --
+        # which is harmless today (the preflight is no-op for non-ghcr
+        # registries) but means the step ran an unnecessary `curl` per
+        # GAR build. Verified: switching to the function form makes the
+        # step conditional on `startsWith(env.IMAGE_NAME, 'ghcr.io/')`
+        # evaluating true, which it does for `ghcr.io/...` images and
+        # not for `*-docker.pkg.dev/...` images.
+        if: {% raw %}startsWith(env.IMAGE_NAME, 'ghcr.io/'){% endraw %}
         env:
           GH_TOKEN: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
         run: |
