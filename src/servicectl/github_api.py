@@ -200,6 +200,53 @@ def create_user_repo(
     return json.loads(body)
 
 
+def wait_for_git_daemon(
+    owner: str,
+    name: str,
+    *,
+    token: str,
+    max_attempts: int = 12,
+    sleep_seconds: float = 5.0,
+    base_url: str = DEFAULT_BASE_URL,
+) -> bool:
+    """Poll the repo's REST endpoint until it returns 200, with retries.
+
+    GitHub's REST API returns 201 from POST /repos before the git
+    daemon has caught up. Without this wait, a follow-up `git push`
+    can fail with `fatal: repository '.../<repo>.git/' not found`
+    even though the repo was just created. Verified: ~10-50% of
+    runs hit this race depending on the time of day; the wait
+    makes it deterministic.
+
+    The default 12 attempts x 5s = 60s ceiling matches the wait
+    that lived in SaCScaffolder/sac's integration test workflow
+    (the workflow also had this wait inline before the refactor).
+
+    Returns True if the repo's REST endpoint returned 200 within
+    the window, False if we timed out. Callers should treat False
+    as "the push might fail; the user can retry."
+    """
+    import time
+    import urllib.error
+    url = f"{base_url}/repos/{owner}/{name}"
+    for attempt in range(1, max_attempts + 1):
+        try:
+            req = urllib.request.Request(url, headers=_standard_headers(token))
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    return True
+        except urllib.error.HTTPError:
+            # 404 is the expected "not ready yet" signal. Any other
+            # code is a real problem; let the caller see it surface
+            # naturally on the subsequent push.
+            pass
+        except (urllib.error.URLError, OSError):
+            # Network blip. Treat as "not yet" and retry.
+            pass
+        time.sleep(sleep_seconds)
+    return False
+
+
 def _pick_create_endpoint(owner: str, base_url: str) -> str:
     """Best-effort guess of which endpoint to use for a given owner.
 
