@@ -39,7 +39,7 @@ from .replay import (
     RefreshNotScaffoldedError,
 )
 from .sac_config import SacConfig, write_config
-from .templates import list_templates
+from .templates import list_templates, TEMPLATES as _TEMPLATES
 
 # Force UTF-8 so Rich's Unicode glyphs (✓, →) don't choke on Windows cp1252 consoles.
 import sys as _sys
@@ -101,6 +101,190 @@ def _write_askpass(token: str) -> str:
 @click.version_option(__version__, prog_name="servicectl")
 def main() -> None:
     """servicectl — self-service DevOps scaffolding."""
+
+
+# Choices lists used by --deploy and other Click options are also used
+# by the interactive prompts below. Keeping them here (instead of inlining
+# in cli.py's @click.option decorators) lets the prompts stay in sync
+# with the CLI surface — if a new deploy target is added, both the flag
+# and the prompt pick it up.
+_DEPLOY_TARGET_CHOICES = ["local", "azure", "gcp-cloud-run", "gcp-gke-autopilot"]
+_REGISTRY_CHOICES = ["dockerhub", "ghcr", "ecr", "acr", "gcr", "gar"]
+_DB_CHOICES = ["postgres", "mysql", "mssql", "cosmosdb"]
+
+
+def _stdin_is_tty() -> bool:
+    """Return True if stdin is a TTY. Wrapped for testability.
+
+    `Click.testing.CliRunner` replaces `sys.stdin` with a non-TTY
+    `TextIOWrapper`, so a test that wants to exercise the interactive
+    prompt path can patch this function to return True without
+    wrestling with the runner's stdin substitution.
+    """
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        # Mock or detached stream — treat as non-TTY.
+        return False
+
+
+def _prompt_missing_init_values(
+    *,
+    name: str | None,
+    template: str | None,
+    deploy_target: str,
+    azure_region: str,
+    gcp_region: str,
+    gcp_project_id: str | None,
+    registry: str,
+    db: str,
+    repo: str | None,
+    repo_private: bool,
+) -> tuple[str, str, str, str, str, str | None, str, str, str | None, bool]:
+    """Prompt for any missing 'interesting' init values when running interactively.
+
+    Called from `init` when `stdin` is a TTY and `--no-input` wasn't
+    passed. Prompts in a fixed order (most general → most specific) and
+    uses the deployed-target choice to gate follow-up region / project
+    prompts.
+
+    Returns the (possibly-updated) values. A value is never re-prompted
+    if the caller already supplied it (CLI flag or --from-config), so
+    the merge order is preserved: prompts are the *last* source of
+    truth, not the first.
+
+    Values we never prompt for (they keep their built-in defaults):
+      - ci_provider           (default: github-actions)
+      - coverage_threshold    (default: 80%)
+      - output_dir            (default: .)
+      - in_place, no_git, no_readme, git_remote (booleans or rare)
+      - from_config, strict_config (developer-facing flags)
+      - repo_no_push          (CI-only flag, never prompted)
+
+    On EOF / Ctrl-C / Ctrl-D during a prompt, the function exits with
+    code 1 and a friendly message — it does NOT raise, so the test
+    suite can call this in a CliRunner and get a clean exit code.
+    """
+    from .templates import TEMPLATES as _TEMPLATES  # local import; click decorator runs at import time
+
+    def _safe_prompt(*args, **kwargs):
+        """Click prompt that maps EOF / KeyboardInterrupt to a clean exit."""
+        try:
+            return click.prompt(*args, **kwargs)
+        except (click.Abort, EOFError, KeyboardInterrupt):
+            err_console.print("\n[yellow]aborted.[/yellow]")
+            sys.exit(1)
+
+    def _safe_confirm(*args, **kwargs):
+        try:
+            return click.confirm(*args, **kwargs)
+        except (click.Abort, EOFError, KeyboardInterrupt):
+            err_console.print("\n[yellow]aborted.[/yellow]")
+            sys.exit(1)
+
+    # 1. NAME (always prompt if missing — required, no good default)
+    if not name:
+        console.print(
+            Panel(
+                "[bold]Welcome to servicectl![/bold]\n\n"
+                "Let's scaffold a new service. I'll ask a few questions; you can "
+                "press Enter to accept the default shown in [cyan][brackets][/cyan].",
+                border_style="cyan",
+            )
+        )
+        while not name:
+            name = _safe_prompt("Service name", type=str).strip()
+            if not name:
+                console.print("[yellow]name cannot be empty[/yellow]")
+
+    # 2. TEMPLATE (always prompt if missing — required, choice)
+        console.print("\n[bold]Template[/bold] — which service framework?")
+        for tid, desc in _TEMPLATES.items():
+            console.print(f"  [cyan]{tid:<18}[/cyan] {desc}")
+        while not template:
+            value = _safe_prompt("Template id", type=click.Choice(list(_TEMPLATES.keys()), case_sensitive=False), show_choices=False).strip()
+            if value:
+                template = value
+
+    # 3. DEPLOY TARGET (default local — prompt to confirm/change)
+    # Click Choice shows the default in the prompt; if user just hits
+    # Enter, it accepts the default. So we always prompt here.
+    console.print("\n[bold]Deployment target[/bold]")
+    deploy_labels = {
+        "local": "local — no remote cloud; just Dockerfile + docker-compose",
+        "azure": "azure — Azure App Service (Linux) + Container Registry",
+        "gcp-cloud-run": "gcp-cloud-run — Google Cloud Run (serverless)",
+        "gcp-gke-autopilot": "gcp-gke-autopilot — GKE Autopilot (managed k8s)",
+    }
+    for d in _DEPLOY_TARGET_CHOICES:
+        console.print(f"  [cyan]{d:<22}[/cyan] {deploy_labels.get(d, '')}")
+    deploy_target = _safe_prompt(
+        "Deploy target",
+        type=click.Choice(_DEPLOY_TARGET_CHOICES, case_sensitive=False),
+        default=deploy_target,
+        show_choices=False,
+    )
+
+    # 4. AZURE / GCP-REGION / GCP-PROJECT-ID (only if relevant deploy)
+    if deploy_target == "azure":
+        azure_region = _safe_prompt("Azure region", default=azure_region)
+    elif deploy_target.startswith("gcp-"):
+        gcp_region = _safe_prompt("GCP region", default=gcp_region)
+        while not gcp_project_id:
+            value = _safe_prompt(
+                f"GCP project ID (required for --deploy={deploy_target})",
+                type=str,
+            ).strip()
+            if value:
+                gcp_project_id = value
+            else:
+                console.print("[yellow]GCP project ID cannot be empty for gcp- deploys[/yellow]")
+
+    # 5. REGISTRY (default ghcr — prompt to confirm/change)
+    console.print("\n[bold]Container registry[/bold]")
+    for r in _REGISTRY_CHOICES:
+        note = ""
+        if r == "gar":
+            note = " (recommended for GCP deploys)"
+        elif r == "gcr":
+            note = " (legacy; prefer gar)"
+        elif r == "ghcr":
+            note = " (default; works with GitHub Actions)"
+        console.print(f"  [cyan]{r:<12}[/cyan]{note}")
+    registry = _safe_prompt(
+        "Registry",
+        type=click.Choice(_REGISTRY_CHOICES, case_sensitive=False),
+        default=registry,
+        show_choices=False,
+    )
+
+    # 6. DATABASE (default postgres — prompt to confirm/change)
+    db = _safe_prompt(
+        "Database",
+        type=click.Choice(_DB_CHOICES, case_sensitive=False),
+        default=db,
+        show_choices=False,
+    )
+
+    # 7. GITHUB REPO CREATION (yes/no prompt; if yes, ask for owner/name)
+    # The user can skip this (it defaults to no), or if they already
+    # passed --repo on the command line we don't re-ask.
+    if repo is None:
+        wants_repo = _safe_confirm("Create a GitHub repo for this service now?", default=False)
+        if wants_repo:
+            while not repo:
+                value = _safe_prompt(
+                    "Repo (format: OWNER/NAME)",
+                    type=str,
+                ).strip()
+                if "/" in value and not value.startswith("/") and not value.endswith("/"):
+                    repo = value
+                else:
+                    console.print("[yellow]must be in OWNER/NAME format (e.g. SaCScaffolder/my-service)[/yellow]")
+            repo_private = _safe_confirm("Make this repo private?", default=False)
+        # else repo stays None and we proceed without GitHub repo creation
+
+    return (name, template, deploy_target, azure_region, gcp_region, gcp_project_id, registry, db, repo, repo_private)
 
 
 @main.command()
@@ -224,6 +408,21 @@ def main() -> None:
     is_flag=True,
     help="With --from-config, error on unknown JSON keys instead of silently dropping them.",
 )
+@click.option(
+    "--no-input",
+    "no_input",
+    is_flag=True,
+    help=(
+        "Disable interactive prompts. By default, `servicectl init` will "
+        "prompt for any missing required values when stdin is a TTY, so "
+        "you can run `servicectl init` with no arguments and walk through "
+        "the choices. Pass --no-input (e.g. in CI or scripts) to skip "
+        "prompts and fail with a clear error instead if a required value "
+        "(name, template, --gcp-project-id for gcp- deploys) is missing. "
+        "Honored values supplied via CLI flags or --from-config are never "
+        "re-prompted."
+    ),
+)
 def init(
     name: str,
     template: str,
@@ -246,6 +445,7 @@ def init(
     repo_no_push: bool,
     from_config: Path | None,
     strict_config: bool,
+    no_input: bool,
 ) -> None:
     """Scaffold a new service named NAME."""
     # Early validation that doesn't depend on --from-config merging. The
@@ -430,6 +630,59 @@ def init(
             err_console.print(
                 "[bold red]error:[/bold red] --template is required (or include it in "
                 "--from-config JSON)."
+            )
+            sys.exit(2)
+
+    # Interactive prompt for any missing "interesting" values when stdin
+    # is a TTY and --no-input wasn't passed. This is the local-dev
+    # ergonomics path: a human can run `servicectl init` with no
+    # arguments and walk through the choices. CI / scripts pass
+    # --no-input and get a clean error if a required value is missing.
+    #
+    # "Interesting" means: the field is required OR has a choice the
+    # user is likely to want to make (deploy target, db, registry).
+    # Universal defaults (ci_provider, coverage_threshold, output_dir,
+    # in_place, no_git, no_readme) are not prompted; they keep their
+    # built-in defaults silently. Values supplied via CLI flags or
+    # --from-config are never re-prompted.
+    if not no_input and _stdin_is_tty() and not os.environ.get("SERVICECTL_NO_INPUT"):
+        name, template, deploy_target, azure_region, gcp_region, gcp_project_id, registry, db, repo, repo_private = _prompt_missing_init_values(
+            name=name,
+            template=template,
+            deploy_target=deploy_target,
+            azure_region=azure_region,
+            gcp_region=gcp_region,
+            gcp_project_id=gcp_project_id,
+            registry=registry,
+            db=db,
+            repo=repo,
+            repo_private=repo_private,
+        )
+    else:
+        # Non-interactive path: fail with a clear message if a required
+        # value is missing. The exceptions are: --gcp-project-id is
+        # *always* required for gcp- deploys (no good default), so we
+        # check that here regardless of whether the prompt ran.
+        if not name:
+            err_console.print(
+                "[bold red]error:[/bold red] 'name' is required. Pass it as the NAME "
+                "argument, include it in --from-config JSON, or run interactively "
+                "(without --no-input) to be prompted."
+            )
+            sys.exit(2)
+        if not template:
+            err_console.print(
+                "[bold red]error:[/bold red] --template is required (or include it in "
+                "--from-config JSON), or run interactively (without --no-input) to be "
+                "prompted."
+            )
+            sys.exit(2)
+        if deploy_target.startswith("gcp-") and not gcp_project_id:
+            err_console.print(
+                f"[bold red]error:[/bold red] --gcp-project-id is required when "
+                f"--deploy={deploy_target}. Pass it on the command line, in "
+                f"--from-config JSON, or run interactively (without --no-input) "
+                f"to be prompted."
             )
             sys.exit(2)
 
