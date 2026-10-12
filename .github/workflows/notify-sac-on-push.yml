@@ -234,9 +234,12 @@ jobs:
               # concurrent PR's watcher) that already concluded, or
               # from a cancelled run that was superseded by a newer
               # one. Without this filter, the watch step would pick
-              # up a stale `X` (cancelled) or already-finished run
-              # and report failure for a test that's actually still
-              # running on a newer run.
+              # up a stale cancelled/already-finished run and report
+              # failure for a test that's actually still running on a
+              # newer run. NOTE: the comment avoids backticks because
+              # this Python code is inside a bash double-quoted string
+              # (python -c "..."), and bash would evaluate backticks
+              # as command substitution -- even on a comment line.
               if 'integration-test-unmodified' in wf_path \
                  and title == 'simple_and_clean-updated' \
                  and created >= cutoff \
@@ -335,9 +338,13 @@ jobs:
               wf_path = r.get('path', '')
               title = r.get('display_title', '')
               created = datetime.datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))
-              # Match `integration-test-pr` but NOT
-              # `integration-test-pr-cleanup` or `-pr-sweeper` (those
-              # are infrastructure workflows, not the test).
+              # Match the integration-test-pr workflow path but NOT
+              # integration-test-pr-cleanup or -pr-sweeper (those are
+              # infrastructure workflows, not the test). NOTE: this
+              # Python code is inside a bash double-quoted string
+              # (python -c "..."), so backticks in comments would be
+              # evaluated as command substitution -- we use plain text
+              # below to avoid that.
               if 'integration-test-pr' in wf_path \
                  and 'integration-test-pr-cleanup' not in wf_path \
                  and 'integration-test-pr-sweeper' not in wf_path \
