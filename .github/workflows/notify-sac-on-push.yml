@@ -226,9 +226,25 @@ jobs:
               wf_path = r.get('path', '')
               title = r.get('display_title', '')
               created = datetime.datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))
+              status = r.get('status', '')
+              conclusion = r.get('conclusion', '')
+              # Only match runs that are still active. Skip cancelled,
+              # completed-success, and completed-failure runs -- those
+              # are typically from a *previous* dispatch (e.g. a
+              # concurrent PR's watcher) that already concluded, or
+              # from a cancelled run that was superseded by a newer
+              # one. Without this filter, the watch step would pick
+              # up a stale cancelled/already-finished run and report
+              # failure for a test that's actually still running on a
+              # newer run. NOTE: the comment avoids backticks because
+              # this Python code is inside a bash double-quoted string
+              # (python -c "..."), and bash would evaluate backticks
+              # as command substitution -- even on a comment line.
               if 'integration-test-unmodified' in wf_path \
                  and title == 'simple_and_clean-updated' \
-                 and created >= cutoff:
+                 and created >= cutoff \
+                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
+                 and not conclusion:
                   print(r['id'])
                   break
           ")
@@ -237,23 +253,114 @@ jobs:
               echo "Found sac integration-test-unmodified run ${RUN_ID}"
               exit 0
             fi
-            echo "  attempt $i/30: no matching sac run yet, sleeping 5s"
+            echo "  attempt $i/30: no matching sac run yet (or matched run was already terminal), sleeping 5s"
             sleep 5
           done
-          echo "::error::No sac integration-test-unmodified run appeared within 150s of dispatch"
+          echo "::error::No active sac integration-test-unmodified run appeared within 150s of dispatch"
           exit 1
 
       - name: Watch sac integration-test-unmodified run to completion
         id: watch
         env:
           TOKEN: ${{ steps.app-token.outputs.token }}
-          RUN_ID: ${{ steps.find-run.outputs.run_id }}
         run: |
-          echo "Watching sac run ${RUN_ID}..."
-          GH_TOKEN="${TOKEN}" gh run watch "${RUN_ID}" \
-            --repo SaCScaffolder/sac \
-            --exit-status
-          echo "::notice::sac integration-test-unmodified passed for ${{ github.sha }}"
+          # If the matched run was cancelled mid-watch (e.g. a
+          # concurrent dispatch's concurrency group superseded
+          # it), the simple gh run watch invocation would exit 1
+          # on a cancelled run, even though a *newer* in-progress
+          # run from the same dispatch is still alive. Re-find
+          # and re-watch on cancellation. Cap retries at 6 to
+          # avoid pathological loops.
+          DISPATCH_MS=${{ steps.dispatch.outputs.dispatch_time_ms }}
+          export CUTOFF_EPOCH=$(( (DISPATCH_MS - 60000) / 1000 ))
+          for attempt in $(seq 1 6); do
+            # Re-find the most recent active run.
+            RUN_ID=$(curl -sS \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/SaCScaffolder/sac/actions/runs?event=repository_dispatch&per_page=10" \
+              | python -c "
+          import json, sys, os, datetime
+          runs = json.load(sys.stdin).get('workflow_runs', [])
+          cutoff = datetime.datetime.fromtimestamp(int(os.environ['CUTOFF_EPOCH']), tz=datetime.timezone.utc)
+          for r in runs:
+              wf_path = r.get('path', '')
+              title = r.get('display_title', '')
+              created = datetime.datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))
+              status = r.get('status', '')
+              conclusion = r.get('conclusion', '')
+              if 'integration-test-unmodified' in wf_path \
+                 and title == 'simple_and_clean-updated' \
+                 and created >= cutoff \
+                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
+                 and not conclusion:
+                  print(r['id'])
+                  break
+          ")
+            if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+              echo "  watch attempt $attempt/6: no active sac run to watch, sleeping 5s"
+              sleep 5
+              continue
+            fi
+            echo "  watch attempt $attempt/6: watching sac run ${RUN_ID}"
+            if GH_TOKEN="${TOKEN}" gh run watch "${RUN_ID}" --repo SaCScaffolder/sac --exit-status; then
+              echo "::notice::sac integration-test-unmodified passed for ${{ github.sha }}"
+              exit 0
+            fi
+            # gh run watch returned non-zero. Inspect the run's
+            # conclusion. If cancelled, re-find; if failure,
+            # propagate the real failure. If unknown (the API
+            # hasn't been updated yet), treat as still in-progress
+            # and re-find.
+            CONCLUSION=$(gh api "repos/SaCScaffolder/sac/actions/runs/${RUN_ID}" --jq '.conclusion' 2>/dev/null || echo "unknown")
+            if [ "$CONCLUSION" = "cancelled" ]; then
+              echo "  run ${RUN_ID} was cancelled, looking for a newer active run"
+              sleep 3
+              continue
+            fi
+            if [ -z "$CONCLUSION" ] || [ "$CONCLUSION" = "null" ] || [ "$CONCLUSION" = "unknown" ] || [ "$CONCLUSION" = "" ]; then
+              echo "  run ${RUN_ID} conclusion unknown (API may be lagging), re-finding"
+              sleep 3
+              continue
+            fi
+            echo "  run ${RUN_ID} concluded with ${CONCLUSION}, propagating failure"
+            exit 1
+          done
+          echo "::error::No sac integration-test-unmodified run completed within 6 watch retries"
+          exit 1
+
+      - name: Set pending status on PR head (PR variant, yellow while waiting)
+        # Sets a SECOND commit status on the simple_and_clean PR's
+        # head SHA, with context `simple_and_clean / sac-integration-test-pr`.
+        # This is the yellow-while-waiting signal for the PR-variant
+        # watcher (added in PR #109). The unmodified watcher has its
+        # own context (`simple_and_clean / sac-integration-test`).
+        # Two separate contexts so each watcher's status is
+        # independently visible on the PR check list -- a slow
+        # PR-variant run doesn't block the unmodified status (and
+        # vice versa) from going green.
+        #
+        # For push events, no-op (the if: guard requires pull_request).
+        if: github.event_name == 'pull_request'
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "::add-mask::${TOKEN}"
+          http_code=$(curl -sS -o /tmp/pending_pr_body.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            -d "{\"state\":\"pending\",\"description\":\"Waiting for SAC per-PR integration test to complete\",\"context\":\"simple_and_clean / sac-integration-test-pr\"}" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${SHA}")
+          if [ "${http_code}" != "201" ]; then
+            echo "::warning::Failed to set PR-variant pending status (HTTP ${http_code})"
+            cat /tmp/pending_pr_body.json || true
+          else
+            echo "Set PR-variant pending status on ${SHA}"
+          fi
 
       - name: Find the resulting sac integration-test-pr run
         # The PR variant of the modified integration test
@@ -289,14 +396,20 @@ jobs:
               wf_path = r.get('path', '')
               title = r.get('display_title', '')
               created = datetime.datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))
-              # Match `integration-test-pr` but NOT
-              # `integration-test-pr-cleanup` or `-pr-sweeper` (those
-              # are infrastructure workflows, not the test).
+              # Match the integration-test-pr workflow path but NOT
+              # integration-test-pr-cleanup or -pr-sweeper (those are
+              # infrastructure workflows, not the test). NOTE: this
+              # Python code is inside a bash double-quoted string
+              # (python -c "..."), so backticks in comments would be
+              # evaluated as command substitution -- we use plain text
+              # below to avoid that.
               if 'integration-test-pr' in wf_path \
                  and 'integration-test-pr-cleanup' not in wf_path \
                  and 'integration-test-pr-sweeper' not in wf_path \
                  and title == 'simple_and_clean-updated' \
-                 and created >= cutoff:
+                 and created >= cutoff \
+                 and r.get('status', '') in ('queued', 'in_progress', 'waiting', 'pending') \
+                 and not r.get('conclusion'):
                   print(r['id'])
                   break
           ")
@@ -305,23 +418,269 @@ jobs:
               echo "Found sac integration-test-pr run ${RUN_ID}"
               exit 0
             fi
-            echo "  attempt $i/30: no matching sac PR-variant run yet, sleeping 5s"
+            echo "  attempt $i/30: no matching sac PR-variant run yet (or matched run was already terminal), sleeping 5s"
             sleep 5
           done
-          echo "::error::No sac integration-test-pr run appeared within 150s of dispatch"
+          echo "::error::No active sac integration-test-pr run appeared within 150s of dispatch"
           exit 1
 
       - name: Watch sac integration-test-pr run to completion
         id: watch-pr
         env:
           TOKEN: ${{ steps.app-token.outputs.token }}
-          RUN_ID: ${{ steps.find-run-pr.outputs.run_id }}
         run: |
-          echo "Watching sac PR-variant run ${RUN_ID}..."
-          GH_TOKEN="${{ steps.app-token.outputs.token }}" gh run watch "${RUN_ID}" \
-            --repo SaCScaffolder/sac \
-            --exit-status
+          DISPATCH_MS=${{ steps.dispatch.outputs.dispatch_time_ms }}
+          export CUTOFF_EPOCH=$(( (DISPATCH_MS - 60000) / 1000 ))
+          for attempt in $(seq 1 6); do
+            RUN_ID=$(curl -sS \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/SaCScaffolder/sac/actions/runs?event=repository_dispatch&per_page=10" \
+              | python -c "
+          import json, sys, os, datetime
+          runs = json.load(sys.stdin).get('workflow_runs', [])
+          cutoff = datetime.datetime.fromtimestamp(int(os.environ['CUTOFF_EPOCH']), tz=datetime.timezone.utc)
+          for r in runs:
+              wf_path = r.get('path', '')
+              title = r.get('display_title', '')
+              created = datetime.datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))
+              status = r.get('status', '')
+              conclusion = r.get('conclusion', '')
+              if 'integration-test-pr' in wf_path \
+                 and 'integration-test-pr-cleanup' not in wf_path \
+                 and 'integration-test-pr-sweeper' not in wf_path \
+                 and title == 'simple_and_clean-updated' \
+                 and created >= cutoff \
+                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
+                 and not conclusion:
+                  print(r['id'])
+                  break
+          ")
+            if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+              echo "  watch attempt $attempt/6: no active sac PR-variant run to watch, sleeping 5s"
+              sleep 5
+              continue
+            fi
+            echo "  watch attempt $attempt/6: watching sac PR-variant run ${RUN_ID}"
+            if GH_TOKEN="${TOKEN}" gh run watch "${RUN_ID}" --repo SaCScaffolder/sac --exit-status; then
+              echo "::notice::sac integration-test-pr passed for ${{ github.sha }}"
+              exit 0
+            fi
+            CONCLUSION=$(gh api "repos/SaCScaffolder/sac/actions/runs/${RUN_ID}" --jq '.conclusion' 2>/dev/null || echo "unknown")
+            if [ "$CONCLUSION" = "cancelled" ]; then
+              echo "  run ${RUN_ID} was cancelled, looking for a newer active run"
+              sleep 3
+              continue
+            fi
+            if [ -z "$CONCLUSION" ] || [ "$CONCLUSION" = "null" ] || [ "$CONCLUSION" = "unknown" ] || [ "$CONCLUSION" = "" ]; then
+              echo "  run ${RUN_ID} conclusion unknown (API may be lagging), re-finding"
+              sleep 3
+              continue
+            fi
+            echo "  run ${RUN_ID} concluded with ${CONCLUSION}, propagating failure"
+            exit 1
+          done
+          echo "::error::No sac integration-test-pr run completed within 6 watch retries"
+          exit 1
           echo "::notice::sac integration-test-pr passed for ${{ github.sha }}"
+
+      - name: Set pending status on PR head (unmodified PR variant, yellow while waiting)
+        # Sets a THIRD commit status on the simple_and_clean PR's
+        # head SHA, with context `simple_and_clean / sac-integration-test-pr-unmodified`.
+        # This is the yellow-while-waiting signal for the unmodified
+        # PR-variant watcher (added in SaCScaffolder/sac#28). The
+        # other two contexts (unmodified post-merge watcher, modified
+        # PR-variant watcher) have their own status pairs.
+        if: github.event_name == 'pull_request'
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "::add-mask::${TOKEN}"
+          http_code=$(curl -sS -o /tmp/pending_pr_unmod_body.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            -d "{\"state\":\"pending\",\"description\":\"Waiting for SAC unmodified per-PR integration test to complete\",\"context\":\"simple_and_clean / sac-integration-test-pr-unmodified\"}" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${SHA}")
+          if [ "${http_code}" != "201" ]; then
+            echo "::warning::Failed to set unmodified PR-variant pending status (HTTP ${http_code})"
+            cat /tmp/pending_pr_unmod_body.json || true
+          else
+            echo "Set unmodified PR-variant pending status on ${SHA}"
+          fi
+
+      - name: Find the resulting sac integration-test-pr-unmodified run
+        # The per-PR variant of the unmodified integration test
+        # (SaCScaffolder/sac/.github/workflows/integration-test-pr-unmodified.yml)
+        # fires on both pull_request and repository_dispatch (same as
+        # the modified variant). This watcher finds the run triggered
+        # by the dispatch from this workflow.
+        #
+        # Same recency-filter pattern as the other two find-runs.
+        # Filter: matches `integration-test-pr-unmodified` in the
+        # workflow path. Cleanup + sweeper are `integration-test-pr-cleanup`
+        # and `integration-test-pr-sweeper` (excluded).
+        id: find-run-pr-unmod
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          DISPATCH_MS=${{ steps.dispatch.outputs.dispatch_time_ms }}
+          export CUTOFF_EPOCH=$(( (DISPATCH_MS - 60000) / 1000 ))
+          echo "Cutoff epoch seconds: ${CUTOFF_EPOCH}"
+          for i in $(seq 1 30); do
+            RUN_ID=$(curl -sS \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/SaCScaffolder/sac/actions/runs?event=repository_dispatch&per_page=10" \
+              | python -c "
+          import json, sys, os, datetime
+          runs = json.load(sys.stdin).get('workflow_runs', [])
+          cutoff = datetime.datetime.fromtimestamp(int(os.environ['CUTOFF_EPOCH']), tz=datetime.timezone.utc)
+          for r in runs:
+              wf_path = r.get('path', '')
+              title = r.get('display_title', '')
+              created = datetime.datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))
+              if 'integration-test-pr-unmodified' in wf_path \
+                 and title == 'simple_and_clean-updated' \
+                 and created >= cutoff \
+                 and r.get('status', '') in ('queued', 'in_progress', 'waiting', 'pending') \
+                 and not r.get('conclusion'):
+                  print(r['id'])
+                  break
+          ")
+            if [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ]; then
+              echo "run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+              echo "Found sac integration-test-pr-unmodified run ${RUN_ID}"
+              exit 0
+            fi
+            echo "  attempt $i/30: no matching sac unmodified PR-variant run yet (or matched run was already terminal), sleeping 5s"
+            sleep 5
+          done
+          echo "::error::No active sac integration-test-pr-unmodified run appeared within 150s of dispatch"
+          exit 1
+
+      - name: Watch sac integration-test-pr-unmodified run to completion
+        id: watch-pr-unmod
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          DISPATCH_MS=${{ steps.dispatch.outputs.dispatch_time_ms }}
+          export CUTOFF_EPOCH=$(( (DISPATCH_MS - 60000) / 1000 ))
+          for attempt in $(seq 1 6); do
+            RUN_ID=$(curl -sS \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/SaCScaffolder/sac/actions/runs?event=repository_dispatch&per_page=10" \
+              | python -c "
+          import json, sys, os, datetime
+          runs = json.load(sys.stdin).get('workflow_runs', [])
+          cutoff = datetime.datetime.fromtimestamp(int(os.environ['CUTOFF_EPOCH']), tz=datetime.timezone.utc)
+          for r in runs:
+              wf_path = r.get('path', '')
+              title = r.get('display_title', '')
+              created = datetime.datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))
+              status = r.get('status', '')
+              conclusion = r.get('conclusion', '')
+              if 'integration-test-pr-unmodified' in wf_path \
+                 and title == 'simple_and_clean-updated' \
+                 and created >= cutoff \
+                 and status in ('queued', 'in_progress', 'waiting', 'pending') \
+                 and not conclusion:
+                  print(r['id'])
+                  break
+          ")
+            if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+              echo "  watch attempt $attempt/6: no active sac unmodified PR-variant run to watch, sleeping 5s"
+              sleep 5
+              continue
+            fi
+            echo "  watch attempt $attempt/6: watching sac unmodified PR-variant run ${RUN_ID}"
+            if GH_TOKEN="${TOKEN}" gh run watch "${RUN_ID}" --repo SaCScaffolder/sac --exit-status; then
+              echo "::notice::sac integration-test-pr-unmodified passed for ${{ github.sha }}"
+              exit 0
+            fi
+            CONCLUSION=$(gh api "repos/SaCScaffolder/sac/actions/runs/${RUN_ID}" --jq '.conclusion' 2>/dev/null || echo "unknown")
+            if [ "$CONCLUSION" = "cancelled" ]; then
+              echo "  run ${RUN_ID} was cancelled, looking for a newer active run"
+              sleep 3
+              continue
+            fi
+            if [ -z "$CONCLUSION" ] || [ "$CONCLUSION" = "null" ] || [ "$CONCLUSION" = "unknown" ] || [ "$CONCLUSION" = "" ]; then
+              echo "  run ${RUN_ID} conclusion unknown (API may be lagging), re-finding"
+              sleep 3
+              continue
+            fi
+            echo "  run ${RUN_ID} concluded with ${CONCLUSION}, propagating failure"
+            exit 1
+          done
+          echo "::error::No sac integration-test-pr-unmodified run completed within 6 watch retries"
+          exit 1
+
+      - name: Set final status on PR head (unmodified PR variant, green or red)
+        if: always() && github.event_name == 'pull_request'
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "::add-mask::${TOKEN}"
+          if [ "${{ steps.watch-pr-unmod.outcome }}" = "success" ] || [ "${{ steps.find-run-pr-unmod.outcome }}" = "success" ]; then
+            STATE="success"
+            DESCRIPTION="SAC unmodified per-PR integration test passed"
+          else
+            STATE="failure"
+            DESCRIPTION="SAC unmodified per-PR integration test failed; see the workflow run for details"
+          fi
+          http_code=$(curl -sS -o /tmp/final_pr_unmod_body.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            -d "{\"state\":\"${STATE}\",\"description\":\"${DESCRIPTION}\",\"context\":\"simple_and_clean / sac-integration-test-pr-unmodified\"}" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${SHA}")
+          if [ "${http_code}" != "201" ]; then
+            echo "::warning::Failed to set unmodified PR-variant final status (HTTP ${http_code})"
+            cat /tmp/final_pr_unmod_body.json || true
+          else
+            echo "Set unmodified PR-variant final status (${STATE}) on ${SHA}"
+          fi
+
+      - name: Set final status on PR head (PR variant, green or red)
+        # Updates the pending status set by 'Set pending status on
+        # PR head (PR variant)' to `success` or `failure` based on
+        # the watch-pr step's outcome. The if: always() ensures the
+        # status is updated even if the watch failed, so the PR
+        # check doesn't get stuck on yellow.
+        if: always() && github.event_name == 'pull_request'
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "::add-mask::${TOKEN}"
+          if [ "${{ steps.watch-pr.outcome }}" = "success" ] || [ "${{ steps.find-run-pr.outcome }}" = "success" ]; then
+            STATE="success"
+            DESCRIPTION="SAC per-PR integration test passed"
+          else
+            STATE="failure"
+            DESCRIPTION="SAC per-PR integration test failed; see the workflow run for details"
+          fi
+          http_code=$(curl -sS -o /tmp/final_pr_body.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            -d "{\"state\":\"${STATE}\",\"description\":\"${DESCRIPTION}\",\"context\":\"simple_and_clean / sac-integration-test-pr\"}" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${SHA}")
+          if [ "${http_code}" != "201" ]; then
+            echo "::warning::Failed to set PR-variant final status (HTTP ${http_code})"
+            cat /tmp/final_pr_body.json || true
+          else
+            echo "Set PR-variant final status (${STATE}) on ${SHA}"
+          fi
 
       - name: Set final status on PR head (green or red)
         # Updates the pending status set at the start of the workflow
@@ -339,7 +698,7 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           echo "::add-mask::${TOKEN}"
-          if [ "${{ steps.watch.outcome }}" = "success" ] && [ "${{ steps.watch-pr.outcome }}" = "success" ] && [ "${{ steps.dispatch.outcome }}" = "success" ]; then
+          if [ "${{ steps.watch.outcome }}" = "success" ] && [ "${{ steps.watch-pr.outcome }}" = "success" ] && [ "${{ steps.watch-pr-unmod.outcome }}" = "success" ] && [ "${{ steps.dispatch.outcome }}" = "success" ]; then
             STATE="success"
             DESCRIPTION="SAC integration test passed"
           else
