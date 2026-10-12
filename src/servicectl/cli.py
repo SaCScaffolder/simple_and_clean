@@ -192,6 +192,7 @@ def main() -> None:
 @click.option("--repo", "repo", type=str, default=None, help="Create the GitHub repo as part of init. Format: OWNER/NAME. After the local scaffold and initial commit, init POSTs to GitHub to create the empty repo, then adds it as `origin` and pushes. Mutually exclusive with --git-remote.")
 @click.option("--repo-private", "repo_private", is_flag=True, help="When used with --repo, create the GitHub repo as private. Default is public.")
 @click.option("--repo-token", "repo_token", type=str, default=None, help="GitHub token to use for the --repo creation. Falls back to $GH_TOKEN, then `gh auth token`. The token is never written to disk by this command.")
+@click.option("--repo-no-push", "repo_no_push", is_flag=True, help="When used with --repo, create the GitHub repo and add it as `origin`, but do NOT push the initial commit. The caller is expected to add more commits (e.g. cherry-picked from a fixture) and push manually. This is the integration-test workflow path where the SAC baseline is one of several commits applied to the repo.")
 @click.option("--in-place", "in_place", is_flag=True, help="Scaffold directly into --output-dir instead of creating a <name> subfolder. Refuses to overwrite a non-empty directory.")
 @click.option(
     "--from-config",
@@ -228,6 +229,7 @@ def init(
     repo: str | None,
     repo_private: bool,
     repo_token: str | None,
+    repo_no_push: bool,
     from_config: Path | None,
     strict_config: bool,
 ) -> None:
@@ -254,6 +256,13 @@ def init(
         err_console.print(
             "[bold red]error:[/bold red] --repo-private is only meaningful with "
             "--repo. It controls the visibility of the GitHub repo being created."
+        )
+        sys.exit(2)
+    if repo_no_push and not repo:
+        err_console.print(
+            "[bold red]error:[/bold red] --repo-no-push is only meaningful with "
+            "--repo. It suppresses the final `git push -u origin main`, which "
+            "is the only push that --repo does."
         )
         sys.exit(2)
 
@@ -389,6 +398,7 @@ def init(
         repo = ctx.params["repo"]
         repo_private = ctx.params["repo_private"]
         repo_token = ctx.params["repo_token"]
+        repo_no_push = ctx.params["repo_no_push"]
 
         # (Mutually-exclusive and required-arg validation moved to the top
         # of init() so it runs even when --from-config isn't used.)
@@ -522,32 +532,43 @@ def init(
             #
             # `git -c credential.helper=` clears any inherited
             # helper so the ASKPASS is what runs.
-            askpass_path: str | None = None
-            if "GIT_ASKPASS" not in os.environ:
-                askpass_path = _write_askpass(token)
-            # Order matters: the literal GIT_ASKPASS key (if we
-            # just wrote one) overrides anything in os.environ, so
-            # our temporary script is the one git sees. The
-            # `os.environ` entries are merged in second so user-set
-            # vars survive (PATH, LANG, etc.).
-            env_for_push = {**os.environ}
-            if askpass_path is not None:
-                env_for_push["GIT_ASKPASS"] = askpass_path
-            try:
-                subprocess.run(
-                    ["git", "-C", str(created), "-c", "credential.helper=",
-                     "push", "-u", "origin", "main"],
-                    check=True,
-                    capture_output=True,
-                    env=env_for_push,
+            #
+            # Skip the push entirely if --repo-no-push was passed.
+            # This is the integration-test path where the workflow
+            # needs to do additional work (e.g. cherry-pick fixture
+            # commits) on top of the SAC baseline before pushing.
+            if repo_no_push:
+                console.print(
+                    "  [bold yellow]o[/bold yellow] skipped `git push` (--repo-no-push); "
+                    "the remote origin is set, push manually when ready"
                 )
-                console.print("  ran      [bold]git push -u origin main[/bold]")
-            finally:
+            else:
+                askpass_path: str | None = None
+                if "GIT_ASKPASS" not in os.environ:
+                    askpass_path = _write_askpass(token)
+                # Order matters: the literal GIT_ASKPASS key (if we
+                # just wrote one) overrides anything in os.environ, so
+                # our temporary script is the one git sees. The
+                # `os.environ` entries are merged in second so user-set
+                # vars survive (PATH, LANG, etc.).
+                env_for_push = {**os.environ}
                 if askpass_path is not None:
-                    try:
-                        os.unlink(askpass_path)
-                    except OSError:
-                        pass
+                    env_for_push["GIT_ASKPASS"] = askpass_path
+                try:
+                    subprocess.run(
+                        ["git", "-C", str(created), "-c", "credential.helper=",
+                         "push", "-u", "origin", "main"],
+                        check=True,
+                        capture_output=True,
+                        env=env_for_push,
+                    )
+                    console.print("  ran      [bold]git push -u origin main[/bold]")
+                finally:
+                    if askpass_path is not None:
+                        try:
+                            os.unlink(askpass_path)
+                        except OSError:
+                            pass
         except subprocess.CalledProcessError as e:
             stderr = e.stderr.decode(errors='replace').strip() or e.stdout.decode(errors='replace').strip()
             err_console.print(
