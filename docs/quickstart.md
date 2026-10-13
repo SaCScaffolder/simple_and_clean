@@ -458,6 +458,148 @@ Once scaffolded, common edits:
 - Add OpenTelemetry, slog, or zap in `internal/<service>/logger.go`.
 - Add auth middleware in `internal/<service>/middleware.go`.
 
+## Refreshing a service
+
+When `simple_and_clean` ships a new template version, a new deploy
+target, or a registry option, the services you already scaffolded need
+to be brought up to date. `servicectl refresh <repo>` re-renders the
+scaffold from the current `simple_and_clean` while preserving the
+developer's commits (via cherry-pick replay onto a worktree). On
+conflict, the worktree is preserved and a recovery ref is printed so
+the user can roll back with `git update-ref`.
+
+### Walk through the deploy-impacting fields interactively
+
+On a TTY, `servicectl refresh` walks you through the
+deploy-impacting fields of `.servicectl.json` (template, deploy
+target, region / project, registry, database) and shows the current
+value as the default for each. Press Enter to keep, type a new value
+to change. The common case — flipping one field — is Enter-spam-fast.
+
+```bash
+# From the service dir, walk through interactively
+$ cd path/to/your-service
+$ servicectl refresh
+
+  Refreshing your-service
+
+  I'm going to walk you through the deploy-impacting fields. Each one
+  shows the current value in [brackets]; press Enter to keep, or type a
+  new value to change.
+
+  Template — which service framework?
+    go-webapi          Go 1.22+ + net/http + PostgreSQL (distroless runtime) (current)
+    python-flask       Python + Flask + PostgreSQL
+    ...
+  Template id [go-webapi]:
+
+  Deployment target
+    local                  local — no remote cloud; just Dockerfile + docker-compose
+    gcp-cloud-run          gcp-cloud-run — Google Cloud Run (serverless) (current)
+    ...
+  Deploy target [gcp-cloud-run]:
+  GCP region [us-central1]:
+  GCP project ID (required for --deploy=gcp-cloud-run) [my-gcp-proj]:
+
+  Container registry
+    dockerhub
+    ghcr         (default; works with GitHub Actions) (current)
+    gcr          (legacy; prefer gar)
+    gar          (recommended for GCP deploys)
+  Registry [ghcr]: gar
+    GAR image path: us-central1-docker.pkg.dev/my-gcp-proj/your-service/your-service:${SHA}
+
+  Database [postgres]:
+
+  Changes:
+    registry: ghcr → gar
+
+  .servicectl.json updated; refresh will use the new values.
+```
+
+The GAR image path is printed as soon as you pick `gar` for the
+registry, so you can see where the next CI run will publish before
+you commit to the change. The same hint fires for any new field
+the user might not yet know the shape of (e.g. the resolved
+`gcr.io` vs `<region>-docker.pkg.dev` path distinction for GCR vs
+GAR).
+
+### What is prompted vs preserved
+
+`refresh` only prompts for fields that affect *deployment*. The
+non-deploy bookkeeping fields are preserved as-is, because changing
+them through a refresh has a different blast radius:
+
+| Field | Prompted? | Why |
+|---|---|---|
+| `template` | yes | Re-render changes the project layout. |
+| `deploy_target` | yes | Changes which CI / Dockerfile / `deploy.yml` overlays apply. |
+| `azure_region` | yes (if `azure`) | Affects which region the Azure overlay targets. |
+| `gcp_region` | yes (if `gcp-*`) | Same shape for GCP. |
+| `gcp_project_id` | yes (if `gcp-*`) | Required for any `gcp-*` deploy; warning if left empty. |
+| `registry` | yes | The whole point of the GCP-stack migration. |
+| `db` | yes | Re-render emits the matching driver / docker-compose. |
+| `service_name` | **no** | Changing it would rename the package and break every import path. Use `servicectl init` in a fresh directory for that. |
+| `ci_provider` | **no** | Describes the *how* of testing, not the *what* of deployment. |
+| `coverage_threshold` | **no** | Same — it doesn't affect deploy. |
+
+If you change `deploy_target` between azure / gcp-* / local, the
+prompt re-asks for the region / project ID of the *new* target and
+drops the irrelevant ones. The stale values for the old target stay
+in the config (preserved verbatim) so a future flip back is a
+one-keystroke change.
+
+### Flags / env
+
+The prompt is opt-in: it's skipped whenever the user can't answer
+interactively.
+
+| Invocation | Behavior |
+|---|---|
+| `servicectl refresh` (TTY) | Walk through interactively, write back on change. |
+| `servicectl refresh` (piped stdin) | Skip the prompt; use on-disk config as-is. |
+| `servicectl refresh --no-input` | Explicit "don't prompt", same as piped stdin. |
+| `SERVICECTL_NO_INPUT=1 servicectl refresh` | CI backdoor; same as `--no-input`. |
+| `servicectl refresh --no-input --yes` | Skip both the value prompts and the final y/n. |
+| `servicectl refresh --dry-run` | Print the planned worktree / recovery ref / config without making any changes. |
+
+`--no-input` is independent of `--yes`: `--yes` skips the final
+confirmation prompt, `--no-input` skips the value-collection
+prompts. You can use either, both, or neither.
+
+### Errors and edge cases
+
+- **Missing `.servicectl.json`.** Refresh refuses to guess the
+  template / deploy / registry flags — a wrong guess would silently
+  change the service. The error points at the missing file; the
+  user re-scaffolds via `servicectl init --from-config=<spec.json>`,
+  or passes `--from-config` to refresh. The interactive prompt
+  cannot help here (no config to walk through), so this is
+  intentionally not gated by TTY.
+- **No SAC-managed commits.** If the repo was never scaffolded by
+  `servicectl`, refresh surfaces `RefreshNotScaffoldedError`. This
+  pre-dates the prompt; preserved as-is.
+- **Cherry-pick conflict.** The worktree is preserved, a recovery
+  ref is printed (`refs/sac/pre-refresh-<run_id>`), and refresh
+  exits 2. With `--resolve-on-conflict`, a resolution branch + PR
+  is opened automatically (this is the integration-test happy path;
+  see [`docs/ci.md`](ci.md#integration-test-loop) for context).
+- **JSON parse error in `.servicectl.json`.** A genuine bug, not a
+  "missing config" case. The error is propagated as-is, not caught
+  and turned into a misleading "no config" message. The prompt
+  path checks for file *existence* (`if cfg_path.exists()`), not
+  file *validity*, so a corrupt config is loud rather than silent.
+
+### What this does NOT do
+
+`refresh` only changes the *scaffold*. It does not migrate the
+service's runtime data, rewrite CI secrets, or push the change to
+the remote. After a successful refresh the worktree is ready to
+merge or fast-forward into the original branch; the user reviews
+the diff and pushes. This is intentional — silent pushes would
+hide deploy-config changes from the developer who owns the
+service.
+
 ---
 
 ## Putting it together — the realistic first day
