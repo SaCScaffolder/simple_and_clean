@@ -287,6 +287,207 @@ def _prompt_missing_init_values(
     return (name, template, deploy_target, azure_region, gcp_region, gcp_project_id, registry, db, repo, repo_private)
 
 
+def _prompt_refresh_overrides(
+    *,
+    config: SacConfig,
+) -> SacConfig:
+    """Walk the user through the deploy-impacting fields of a refresh.
+
+    Each field shows its current value (from `.servicectl.json`) as the
+    default. Press Enter to keep; type a new value to change. This is
+    the "I came here to flip one field" UX — most prompts just hit
+    Enter. The common case is something like ``servicectl refresh``
+    after a deploy-target change: you want to keep 6 of 7 fields the
+    same and update one.
+
+    Fields that don't affect deploy (``ci_provider``,
+    ``coverage_threshold``, ``service_name``) are intentionally NOT
+    prompted; the refresh preserves them as-is.
+
+      - ``service_name`` is excluded because changing it would rename
+        the package and invalidate every import path inside the
+        service. That's a destructive operation best done via
+        ``servicectl init`` in a fresh directory, not via refresh.
+      - ``ci_provider`` and ``coverage_threshold`` are preserved
+        because they describe the *how* of testing, not the *what* of
+        deployment, and refreshing shouldn't silently toggle them.
+
+    Returns a ``SacConfig`` with the (possibly) updated fields. The
+    caller is responsible for writing the new config back to disk via
+    ``write_config(repo, new_config)`` if anything changed, and for
+    informing the user what changed.
+
+    GCP exposure note: when the user picks a ``gcp-*`` deploy target
+    we re-prompt for ``gcp_region`` and ``gcp_project_id`` (with the
+    current value as the default). When they pick ``gar`` for the
+    registry, we print the resolved GAR image path so the user can see
+    where the next CI run will publish. This is the "I just learned
+    this" detail that makes the prompt actually useful during a
+    GCP migration.
+    """
+    from .templates import TEMPLATES as _TEMPLATES  # local import; see _prompt_missing_init_values
+
+    def _safe_prompt(*args, **kwargs):
+        try:
+            return click.prompt(*args, **kwargs)
+        except (click.Abort, EOFError, KeyboardInterrupt):
+            err_console.print("\n[yellow]aborted.[/yellow]")
+            sys.exit(1)
+
+    def _safe_confirm(*args, **kwargs):
+        try:
+            return click.confirm(*args, **kwargs)
+        except (click.Abort, EOFError, KeyboardInterrupt):
+            err_console.print("\n[yellow]aborted.[/yellow]")
+            sys.exit(1)
+
+    # 1. TEMPLATE (default = current value; choice of TEMPLATES)
+    console.print("\n[bold]Template[/bold] — which service framework?")
+    for tid, desc in _TEMPLATES.items():
+        marker = " [cyan](current)[/cyan]" if tid == config.template else ""
+        console.print(f"  [cyan]{tid:<18}[/cyan] {desc}{marker}")
+    template = _safe_prompt(
+        "Template id",
+        type=click.Choice(list(_TEMPLATES.keys()), case_sensitive=False),
+        default=config.template,
+        show_choices=False,
+    )
+
+    # 2. DEPLOY TARGET (default = current value)
+    console.print("\n[bold]Deployment target[/bold]")
+    deploy_labels = {
+        "local": "local — no remote cloud; just Dockerfile + docker-compose",
+        "azure": "azure — Azure App Service (Linux) + Container Registry",
+        "gcp-cloud-run": "gcp-cloud-run — Google Cloud Run (serverless)",
+        "gcp-gke-autopilot": "gcp-gke-autopilot — GKE Autopilot (managed k8s)",
+    }
+    for d in _DEPLOY_TARGET_CHOICES:
+        marker = " [cyan](current)[/cyan]" if d == config.deploy_target else ""
+        console.print(f"  [cyan]{d:<22}[/cyan] {deploy_labels.get(d, '')}{marker}")
+    deploy_target = _safe_prompt(
+        "Deploy target",
+        type=click.Choice(_DEPLOY_TARGET_CHOICES, case_sensitive=False),
+        default=config.deploy_target,
+        show_choices=False,
+    )
+
+    # 3. REGION / PROJECT — only prompt for the ones the new target uses.
+    # If the user changed deploy_target from azure to gcp-cloud-run we
+    # stop prompting for azure_region and start prompting for
+    # gcp_region + gcp_project_id. This mirrors init's behavior and is
+    # the most intuitive flow during a migration.
+    azure_region = config.azure_region
+    gcp_region = config.gcp_region
+    gcp_project_id = config.gcp_project_id
+    if deploy_target == "azure":
+        azure_region = _safe_prompt("Azure region", default=azure_region)
+    elif deploy_target.startswith("gcp-"):
+        gcp_region = _safe_prompt("GCP region", default=gcp_region)
+        # For gcp_project_id, allow Enter to keep the current value
+        # but warn if it's empty (migrations from non-GCP deploys won't
+        # have one set).
+        prompt_default = gcp_project_id or ""
+        value = _safe_prompt(
+            f"GCP project ID (required for --deploy={deploy_target})",
+            type=str,
+            default=prompt_default,
+        ).strip()
+        if not value:
+            console.print(
+                f"[yellow]warning:[/yellow] GCP project ID is empty; the next "
+                f"CI run with --deploy={deploy_target} will fail until you "
+                f"set it in .servicectl.json (or re-run refresh with --no-input "
+                f"after editing the file)."
+            )
+        gcp_project_id = value or None
+
+    # 4. REGISTRY (default = current value; print GAR image path if gar)
+    console.print("\n[bold]Container registry[/bold]")
+    for r in _REGISTRY_CHOICES:
+        note = ""
+        if r == "gar":
+            note = " (recommended for GCP deploys)"
+        elif r == "gcr":
+            note = " (legacy; prefer gar)"
+        elif r == "ghcr":
+            note = " (default; works with GitHub Actions)"
+        marker = " [cyan](current)[/cyan]" if r == config.registry else ""
+        console.print(f"  [cyan]{r:<12}[/cyan]{note}{marker}")
+    registry = _safe_prompt(
+        "Registry",
+        type=click.Choice(_REGISTRY_CHOICES, case_sensitive=False),
+        default=config.registry,
+        show_choices=False,
+    )
+
+    # 4a. GCP exposure: if the user picked gar, show the resolved
+    # image path so they can see where the next CI run will publish.
+    # This is the kind of "I just learned this" detail that's worth a
+    # one-liner; without it the user picks gar without understanding
+    # the path change.
+    if registry == "gar" and gcp_project_id:
+        image = config.service_name or "<service-name>"
+        console.print(
+            f"  [dim]GAR image path:[/dim] [cyan]{gcp_region}-docker.pkg.dev/"
+            f"{gcp_project_id}/{config.service_name or '<repo>'}/{image}:${{SHA}}[/cyan]"
+        )
+    elif registry == "gar":
+        console.print(
+            f"  [dim]GAR image path:[/dim] [yellow]cannot resolve -- gcp_project_id is empty[/yellow]"
+        )
+
+    # 5. DATABASE (default = current value)
+    db = _safe_prompt(
+        "Database",
+        type=click.Choice(_DB_CHOICES, case_sensitive=False),
+        default=config.db,
+        show_choices=False,
+    )
+
+    # Build a new SacConfig preserving the non-prompted fields. We
+    # use the dataclass replace() so unknown fields (sac_version,
+    # sac_base_commit) are carried over verbatim.
+    import dataclasses
+    return dataclasses.replace(
+        config,
+        template=template,
+        deploy_target=deploy_target,
+        azure_region=azure_region,
+        gcp_region=gcp_region,
+        gcp_project_id=gcp_project_id,
+        registry=registry,
+        db=db,
+    )
+
+
+def _summarize_refresh_changes(
+    before: SacConfig,
+    after: SacConfig,
+) -> list[str]:
+    """Return a list of human-readable change descriptions for the refresh prompt.
+
+    Only fields actually affected by the prompt (template,
+    deploy_target, azure_region, gcp_region, gcp_project_id, registry,
+    db) are compared. Returns [] if nothing changed.
+    """
+    changes: list[str] = []
+    fields = [
+        ("template", "template"),
+        ("deploy_target", "deploy target"),
+        ("azure_region", "Azure region"),
+        ("gcp_region", "GCP region"),
+        ("gcp_project_id", "GCP project ID"),
+        ("registry", "registry"),
+        ("db", "database"),
+    ]
+    for attr, label in fields:
+        old = getattr(before, attr)
+        new = getattr(after, attr)
+        if old != new:
+            changes.append(f"  {label}: [yellow]{old}[/yellow] → [green]{new}[/green]")
+    return changes
+
+
 @main.command()
 @click.argument(
     "name",
@@ -1126,7 +1327,26 @@ def doctor(path: Path, strict: bool, as_json: bool, pause: bool) -> None:
         "conflict and let the user resolve manually."
     ),
 )
-def refresh(repo: Path, dry_run: bool, yes: bool, resolve_on_conflict: bool) -> None:
+@click.option(
+    "--no-input",
+    "no_input",
+    is_flag=True,
+    help=(
+        "Disable the interactive override prompt. By default, "
+        "`servicectl refresh` will walk you through the "
+        "deploy-impacting fields (template, deploy target, region / "
+        "project, registry, database) when stdin is a TTY, showing "
+        "the current value (from .servicectl.json) as the default "
+        "for each so you can flip a single field without re-typing "
+        "the rest. Pass --no-input (e.g. in CI or scripts) to use "
+        "the on-disk config as-is. Honored automatically when stdin "
+        "is not a TTY (piped input / CI); honored by env var "
+        "SERVICECTL_NO_INPUT=1 as a backdoor. Independent of --yes: "
+        "--yes skips the final yes/no confirmation, --no-input skips "
+        "the value-collection prompts."
+    ),
+)
+def refresh(repo: Path, dry_run: bool, yes: bool, resolve_on_conflict: bool, no_input: bool) -> None:
     """Refresh an existing scaffolded service against the current simple_and_clean.
 
     Classifies the repo's commits into SAC-managed (filtered out) and
@@ -1150,6 +1370,64 @@ def refresh(repo: Path, dry_run: bool, yes: bool, resolve_on_conflict: bool) -> 
     then re-runs refresh.
     """
     from .replay import refresh as replay_refresh
+
+    # Interactive override prompt: if stdin is a TTY, --no-input wasn't
+    # passed, and SERVICECTL_NO_INPUT isn't set, walk the user through
+    # the deploy-impacting fields of .servicectl.json. Each field
+    # shows its current value as the default so the common case
+    # ("flip one field") is Enter-spam-fast. If anything changed,
+    # write the new config back to disk so replay_refresh() picks it
+    # up; replay_refresh() reads .servicectl.json from disk early, so
+    # a config write here propagates naturally.
+    #
+    # We read the config ourselves rather than going through
+    # replay_refresh() so the prompt can run before replay_refresh()
+    # does any heavy work. If the config is missing we let
+    # replay_refresh() raise RefreshConfigMissing; the user gets the
+    # same error as before the prompt existed.
+    from .sac_config import read_config as _read_cfg
+    from .sac_config import write_config as _write_cfg
+    current_config: SacConfig | None = None
+    cfg_path = repo / ".servicectl.json"
+    if cfg_path.exists():
+        # Only read the config if the file exists; a missing config
+        # is a legitimate refresh-time error and we let the existing
+        # RefreshConfigMissing path surface it. (We can't use a bare
+        # try/except here because read_config() raises FileNotFoundError
+        # for the missing-file case, but it can also raise other
+        # exceptions -- e.g. JSON parse errors -- that we DO want to
+        # propagate as bugs rather than silently turning into
+        # "missing config".)
+        current_config = _read_cfg(repo)
+
+    if (
+        current_config is not None
+        and not no_input
+        and _stdin_is_tty()
+        and not os.environ.get("SERVICECTL_NO_INPUT")
+    ):
+        console.print(
+            Panel(
+                f"[bold]Refreshing {current_config.service_name or repo}[/bold]\n\n"
+                f"I'm going to walk you through the deploy-impacting "
+                f"fields. Each one shows the current value in [cyan]"
+                f"[brackets][/cyan]; press Enter to keep, or type a new "
+                f"value to change.",
+                border_style="cyan",
+            )
+        )
+        new_config = _prompt_refresh_overrides(config=current_config)
+        changes = _summarize_refresh_changes(current_config, new_config)
+        if changes:
+            _write_cfg(repo, new_config)
+            console.print("\n[bold]Changes:[/bold]")
+            for line in changes:
+                console.print(line)
+            console.print(
+                f"\n[dim].servicectl.json updated; refresh will use the new values.[/dim]"
+            )
+        else:
+            console.print("\n[dim]No changes; refresh will use the on-disk config.[/dim]")
 
     # Lazy import to keep `servicectl --help` fast and to avoid a circular
     # import risk (replay -> generator -> sac_trailers at module-load time).
