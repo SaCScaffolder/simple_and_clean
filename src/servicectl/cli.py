@@ -367,9 +367,13 @@ def _prompt_refresh_overrides(
         deployment, and refreshing shouldn't silently toggle them.
 
     Returns a ``SacConfig`` with the (possibly) updated fields. The
-    caller is responsible for writing the new config back to disk via
-    ``write_config(repo, new_config)`` if anything changed, and for
-    informing the user what changed.
+    caller is responsible for telling the user what changed. The
+    caller does NOT write the new config back to disk; ``refresh``
+    threads the result into ``replay_refresh()`` via the new
+    ``config_override`` parameter, so the source repo's working
+    tree stays pristine until the user accepts the post-refresh
+    merge prompt and the worktree branch is fast-forwarded into
+    the source branch.
 
     GCP exposure note: when the user picks a ``gcp-*`` deploy target
     we re-prompt for ``gcp_region`` and ``gcp_project_id`` (with the
@@ -1454,7 +1458,6 @@ def refresh(
     # replay_refresh() raise RefreshConfigMissing; the user gets the
     # same error as before the prompt existed.
     from .sac_config import read_config as _read_cfg
-    from .sac_config import write_config as _write_cfg
     current_config: SacConfig | None = None
     cfg_path = repo / ".servicectl.json"
     if cfg_path.exists():
@@ -1468,6 +1471,13 @@ def refresh(
         # "missing config".)
         current_config = _read_cfg(repo)
 
+    # Declared outside the prompt guard so they're always defined
+    # for the `replay_refresh()` call below, even when the prompt
+    # path is skipped (--no-input, non-TTY, env-var override, or
+    # missing `.servicectl.json` -- in which case the user never
+    # got to change anything and `changes` is empty).
+    new_config: SacConfig | None = None
+    changes: list[str] = []
     if (
         current_config is not None
         and not no_input
@@ -1487,20 +1497,48 @@ def refresh(
         new_config = _prompt_refresh_overrides(config=current_config)
         changes = _summarize_refresh_changes(current_config, new_config)
         if changes:
-            _write_cfg(repo, new_config)
             console.print("\n[bold]Changes:[/bold]")
             for line in changes:
                 console.print(line)
             console.print(
-                f"\n[dim].servicectl.json updated; refresh will use the new values.[/dim]"
+                f"\n[dim]refresh will use the new values; the source repo's "
+                f".servicectl.json is left untouched until the worktree "
+                f"branch is merged.[/dim]"
             )
         else:
             console.print("\n[dim]No changes; refresh will use the on-disk config.[/dim]")
 
     # Lazy import to keep `servicectl --help` fast and to avoid a circular
     # import risk (replay -> generator -> sac_trailers at module-load time).
+    #
+    # `config_override` plumbing: when the prompt was interactive AND
+    # the user actually changed something, thread the in-memory
+    # `new_config` into `replay_refresh()` rather than writing it to
+    # disk first. The CLI used to do `_write_cfg(repo, new_config)`
+    # here so that `replay_refresh()` could re-read it from disk, but
+    # that left the source repo's working tree dirty with a
+    # prompt-confirmed `.servicectl.json` -- which has two annoying
+    # consequences:
+    #   1. The follow-up `git merge --ff-only sac/refresh/<id>` from
+    #      inside the source repo refuses with "Your local changes to
+    #      the following files would be overwritten by merge:
+    #      .servicectl.json" because the on-disk dirty index conflicts
+    #      with the merge target's working tree, even when the content
+    #      matches the worktree's `.servicectl.json` byte-for-byte.
+    #   2. Even after a successful fast-forward, the dirty state
+    #      persists in `git status` until the user commits or stashes
+    #      -- fast-forward updates `HEAD`/the index but doesn't touch
+    #      the working tree's "modified" flag for an already-dirty file.
+    # Threading the config in memory (via replay.refresh()'s new
+    # `config_override` parameter) keeps the source repo pristine
+    # across the refresh regardless of whether the user accepts or
+    # declines the post-refresh merge prompt.
     try:
-        run = replay_refresh(repo, dry_run=dry_run)
+        run = replay_refresh(
+            repo,
+            dry_run=dry_run,
+            config_override=new_config if changes else None,
+        )
     except RefreshNotScaffoldedError as e:
         err_console.print(f"[bold red]error:[/bold red] {e}")
         sys.exit(2)

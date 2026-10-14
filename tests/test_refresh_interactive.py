@@ -18,9 +18,19 @@ This file pins that contract:
      pass `--no-input` (e.g. wrappers).
   4. The prompt walks through template / deploy / region / project /
      registry / db with the current value as the default for each.
-  5. If anything changed, `.servicectl.json` is written back to disk
-     before `replay_refresh()` runs.
-  6. If nothing changed, the prompt exits cleanly and no write happens.
+  5. If anything changed, the new config flows into
+     `replay_refresh()` via the new `config_override` parameter --
+     NOT by writing back to `.servicectl.json` on disk. The source
+     repo's working tree stays pristine so the follow-up
+     `git merge --ff-only sac/refresh/<id>` of the worktree branch
+     doesn't fail with "Your local changes to the following files
+     would be overwritten by merge" against an uncommitted dirty
+     index entry. The new values only land on `main` when the user
+     accepts the post-refresh merge prompt and the worktree branch
+     is fast-forwarded into the source branch.
+  6. If nothing changed, the prompt exits cleanly and no
+     `config_override` is passed (replay reads the on-disk config
+     as before).
   7. Picking `gcp-*` deploy target re-prompts for region + project ID;
      picking `azure` re-prompts for region; picking `local` skips both.
   8. Picking `gar` registry prints the resolved GAR image path so the
@@ -100,7 +110,19 @@ def _stub_replay(*, succeeded: bool = True, scaffold_sha: str = "deadbeef"):
     failure paths in `test_refresh.py`. These tests focus on the
     prompt logic, not the replay outcome.
     """
-    def _make_run(repo: Path, dry_run: bool = False) -> RefreshRun:
+    def _make_run(
+        repo: Path,
+        dry_run: bool = False,
+        config_override: SacConfig | None = None,
+    ) -> RefreshRun:
+        # The CLI passes `config_override` whenever the prompt path
+        # produced a new config. We don't use it here -- the stub
+        # just returns a fixed RefreshRun -- but the signature has
+        # to accept it, otherwise the call from cli.refresh raises
+        # TypeError. See the `config_override` docstring in
+        # replay.refresh for why the CLI threads the override
+        # instead of writing to disk.
+        _ = config_override
         return RefreshRun(
             run_id="test1234",
             source_repo=repo,
@@ -397,8 +419,13 @@ class TestPromptFlow:
     def test_change_registry_writes_new_value(self):
         """The canonical use case: user accepts everything except
         registry, which they change from `ghcr` to `gar`. The new
-        value should be written to .servicectl.json before
-        replay_refresh() runs."""
+        value should flow into replay.refresh() via the
+        `config_override` parameter -- but the source repo's
+        `.servicectl.json` must remain unchanged on disk, so the
+        follow-up `git merge --ff-only` of the worktree branch
+        doesn't fail with "Your local changes would be overwritten
+        by merge" against an uncommitted dirty index entry.
+        """
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
             # 1. template (accept), 2. deploy (accept), 3. gcp_region
@@ -422,20 +449,24 @@ class TestPromptFlow:
                     repo=repo, yes=True, answer_callable=_side_effect,
                 )
             assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
+            # Source repo's .servicectl.json must be unchanged: the
+            # new value flows in-memory via `config_override` (see
+            # `_stub_replay`'s `config_override` parameter and the
+            # docstring in replay.refresh for the full rationale).
             on_disk = read_config(repo)
-            assert on_disk.registry == "gar"
-            # Everything else preserved
-            assert on_disk.template == BASELINE_CONFIG.template
-            assert on_disk.deploy_target == BASELINE_CONFIG.deploy_target
-            assert on_disk.gcp_region == BASELINE_CONFIG.gcp_region
-            assert on_disk.gcp_project_id == BASELINE_CONFIG.gcp_project_id
-            assert on_disk.db == BASELINE_CONFIG.db
+            assert on_disk == BASELINE_CONFIG
 
     def test_change_deploy_to_azure_prompts_for_region_not_project(self):
         """Switching from gcp-cloud-run to azure should:
           - prompt for azure_region (new)
           - NOT prompt for gcp_region / gcp_project_id (no longer relevant)
-          - write the new deploy_target + azure_region to disk
+          - flow the new deploy_target + azure_region into
+            replay.refresh() via `config_override`, leaving
+            `.servicectl.json` untouched on disk (so the follow-up
+            `git merge --ff-only` succeeds cleanly -- see the
+            `config_override` docstring in replay.refresh for the
+            full rationale on the dirty-index merge failure this
+            used to cause).
         """
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
@@ -460,12 +491,10 @@ class TestPromptFlow:
                     repo=repo, yes=True, answer_callable=_side_effect,
                 )
             assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
+            # Source repo's .servicectl.json is unchanged (the new
+            # values flow in-memory via config_override).
             on_disk = read_config(repo)
-            assert on_disk.deploy_target == "azure"
-            assert on_disk.azure_region == "westus2"
-            # gcp_* preserved as-is (untouched, even if stale)
-            assert on_disk.gcp_region == BASELINE_CONFIG.gcp_region
-            assert on_disk.gcp_project_id == BASELINE_CONFIG.gcp_project_id
+            assert on_disk == BASELINE_CONFIG
 
     def test_change_deploy_to_gcp_prompts_for_region_and_project(self):
         """Switching from azure to gcp-cloud-run should:
@@ -473,6 +502,8 @@ class TestPromptFlow:
           - prompt for gcp_region + gcp_project_id (with current
             values as defaults, even if the current values are
             stale/empty for an azure config)
+          - leave the source repo's `.servicectl.json` untouched,
+            so the follow-up `git merge --ff-only` works cleanly.
         """
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
@@ -508,9 +539,13 @@ class TestPromptFlow:
                     repo=repo, yes=True, answer_callable=_side_effect,
                 )
             assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
+            # The new config flows in-memory via `config_override`;
+            # the source repo's `.servicectl.json` is unchanged. The
+            # new values only land on `main` when the worktree branch
+            # is fast-forwarded into the source branch (i.e. when the
+            # user accepts the post-refresh merge prompt).
             on_disk = read_config(repo)
-            assert on_disk.deploy_target == "gcp-cloud-run"
-            assert on_disk.gcp_project_id == "my-new-gcp-proj"
+            assert on_disk == azure_config
 
     def test_gar_registry_prints_resolved_image_path(self):
         """The GCP-exposure touch: when the user picks `gar`, the
@@ -603,7 +638,12 @@ class TestAutoMerge:
         branch_name='sac/refresh/test1234' so the merge helper knows
         what to do."""
         from servicectl.replay import RefreshRun
-        def _make_run(repo: Path, dry_run: bool = False) -> RefreshRun:
+        def _make_run(
+            repo: Path,
+            dry_run: bool = False,
+            config_override: SacConfig | None = None,
+        ) -> RefreshRun:
+            _ = config_override
             return RefreshRun(
                 run_id="test1234",
                 source_repo=repo,
