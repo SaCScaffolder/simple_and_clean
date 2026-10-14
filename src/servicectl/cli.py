@@ -42,6 +42,7 @@ from .sac_config import SacConfig, write_config
 from .templates import list_templates, TEMPLATES as _TEMPLATES
 
 # Force UTF-8 so Rich's Unicode glyphs (✓, →) don't choke on Windows cp1252 consoles.
+import os as _os
 import sys as _sys
 import io as _io
 
@@ -54,8 +55,27 @@ if _sys.platform == "win32":
         _sys.stdout = _io.TextIOWrapper(_sys.stdout.buffer, encoding="utf-8")
         _sys.stderr = _io.TextIOWrapper(_sys.stderr.buffer, encoding="utf-8")
 
-console = Console(force_terminal=None, legacy_windows=False)
-err_console = Console(stderr=True, style="bold red")
+    # Detect VT (virtual terminal) support. Windows Terminal sets WT_SESSION;
+    # legacy conhost does not. When VT is OFF, the conhost prints Rich's
+    # ANSI escape sequences as literal text (you see "[1m" instead of bold),
+    # so we tell Rich to use the Win32 console API instead via legacy_windows.
+    _HAS_VT = bool(
+        _os.environ.get("WT_SESSION")
+        or "xterm" in _os.environ.get("TERM", "").lower()
+        or "256color" in _os.environ.get("TERM", "").lower()
+    )
+else:
+    _HAS_VT = True
+
+# On a legacy conhost (no VT support), `safe_box=True` (the Rich default)
+# silently substitutes `box.ROUNDED` with HEAVY corners because it can't
+# prove the encoding handles the Unicode box-drawing chars. We know our
+# stream is UTF-8 (reconfigured above), so opt out of the substitution
+# and let the round corners through.
+console = Console(legacy_windows=not _HAS_VT, safe_box=False)
+err_console = Console(
+    stderr=True, style="bold red", legacy_windows=not _HAS_VT, safe_box=False,
+)
 
 
 def _write_askpass(token: str) -> str:
