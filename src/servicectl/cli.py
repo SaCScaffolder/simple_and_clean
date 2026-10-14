@@ -94,9 +94,15 @@ def _safe_ask(questionary_fn, *args, **kwargs):
     ``questionary.confirm`` it's ``True`` / ``False``. The caller
     picks the right questionary function for the prompt shape and
     gets the right return type out.
+
+    We pass ``kbi_msg=""`` to ``.ask()`` to suppress questionary's
+    default ``"\nCancelled by user\n"`` message. Without this the
+    user would see two abort messages on Ctrl-C (questionary's and
+    ours); with it, the single ``aborted.`` line is the canonical
+    one across the whole CLI.
     """
     try:
-        result = questionary_fn(*args, **kwargs).ask()
+        result = questionary_fn(*args, **kwargs).ask(kbi_msg="")
     except (KeyboardInterrupt, EOFError):
         result = None
     if result is None:

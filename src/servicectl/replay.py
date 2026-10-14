@@ -331,14 +331,11 @@ def refresh(
         # we proceed (and the missing-config error fires below). If it
         # doesn't, we report RefreshNotScaffoldedError first.
         #
-        # If the caller passed a config_override, a missing on-disk
-        # config is fine (the override wins); we don't want to
-        # surface RefreshConfigMissing when the user has already
-        # provided a config in memory.
-        if config_override is None:
-            pass
-        else:
-            raise
+        # Note: with `config_override` set, `read_config()` is skipped
+        # and this `FileNotFoundError` catch is unreachable. We leave
+        # the `except` in place defensively in case a future call in
+        # this block starts reading from disk again.
+        pass
 
     # Classify history. Errors from a bad SAC_BASE_COMMIT SHA surface
     # as RefreshError so the CLI can convert them to a clean message.
