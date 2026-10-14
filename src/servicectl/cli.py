@@ -1683,7 +1683,6 @@ def _merge_and_cleanup_worktree(
                 f"      git worktree remove {worktree_dir}\n"
                 f"      git branch -D {branch_name}",
                 border_style="red",
-                box=_rich_box.ASCII,
             )
         )
         return False
@@ -1706,7 +1705,6 @@ def _merge_and_cleanup_worktree(
                 f"Remove it by hand with:\n"
                 f"  git worktree remove {worktree_dir} --force",
                 border_style="yellow",
-                box=_rich_box.ASCII,
             )
         )
         return False
@@ -1760,7 +1758,6 @@ def _print_manual_merge_commands(
             f"you need to roll back: refs/sac/pre-refresh-<run_id>.",
             title=f"merge {branch_name} into {base_branch}",
             border_style="cyan",
-            box=_rich_box.ASCII,
         )
     )
 
