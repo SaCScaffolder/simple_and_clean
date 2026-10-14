@@ -116,6 +116,32 @@ class TestSafeAsk:
         assert "aborted" in mock_err.print.call_args.args[0].lower()
         mock_exit.assert_called_once_with(1)
 
+    def test_invalid_default_raises_valueerror_at_construct_is_caught(self):
+        """questionary.select(choices=..., default=X) raises
+        ValueError at construct time if X is not in the choices. This
+        happens when a manually-edited `.servicectl.json` has a
+        stale value (e.g. `deploy_target: "kubernetes"` after that
+        option was removed from `_DEPLOY_TARGET_CHOICES`). Without
+        this catch the user sees a stack trace; with it, they see
+        the ValueError message + `aborted.` and a clean exit."""
+        def _raise_invalid_default(*a, **kw):
+            raise ValueError(
+                "Invalid `default` value passed. The value "
+                "(`kubernetes`) does not exist in the set of choices."
+            )
+        with patch("sys.exit") as mock_exit:
+            with patch("servicectl.cli.err_console") as mock_err:
+                _safe_ask(_raise_invalid_default)
+        # First print: the error message itself
+        first_print = mock_err.print.call_args_list[0].args[0]
+        assert "kubernetes" in first_print
+        assert "default" in first_print.lower()
+        # Second print: the canonical `aborted.` line
+        second_print = mock_err.print.call_args_list[1].args[0]
+        assert "aborted" in second_print.lower()
+        # Clean exit
+        mock_exit.assert_called_once_with(1)
+
 
 class _FakePrompt:
     """A minimal stand-in for a questionary prompt object.

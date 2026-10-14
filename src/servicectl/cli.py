@@ -100,13 +100,34 @@ def _safe_ask(questionary_fn, *args, **kwargs):
     user would see two abort messages on Ctrl-C (questionary's and
     ours); with it, the single ``aborted.`` line is the canonical
     one across the whole CLI.
+
+    We also catch ``ValueError`` at prompt-construct time and
+    translate it into the same "aborted." exit pattern. This is
+    defensive: ``questionary.select(choices=..., default=...)``
+    raises ``ValueError("Invalid `default` value passed. The value
+    (`X`) does not exist in the set of choices.")`` if the config
+    file's value is not in the current choice list (e.g. a manually
+    edited ``.servicectl.json`` with a stale ``deploy_target`` like
+    ``"kubernetes"`` that's been removed from the choices). Without
+    this catch, the user would see a stack trace; with it, they
+    see ``aborted.`` and a clean exit, which is at least no worse
+    than the pre-questionary ``click.prompt`` behavior (which
+    surfaced ``click.UsageError`` in a similarly unhelpful way).
     """
     try:
         result = questionary_fn(*args, **kwargs).ask(kbi_msg="")
     except (KeyboardInterrupt, EOFError):
         result = None
+    except ValueError as e:
+        # An invalid `default` for questionary.select -- treat as
+        # the user aborting, since the only way to recover is to
+        # edit `.servicectl.json` and re-run. The error message
+        # itself is printed for diagnostic value; if the user can
+        # figure out what's wrong from the trace they can fix it.
+        err_console.print(f"\n[red]error:[/red] {e}")
+        result = None
     if result is None:
-        err_console.print("\n[yellow]aborted.[/yellow]")
+        err_console.print("[yellow]aborted.[/yellow]")
         sys.exit(1)
     return result
 
