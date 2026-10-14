@@ -228,7 +228,7 @@ def _prompt_missing_init_values(
         )
         while not name:
             name = _safe_ask(
-                questionary.text, "Service name",
+                questionary.text, "Service name: ",
             ).strip()
             if not name:
                 console.print("[yellow]name cannot be empty[/yellow]")
@@ -259,7 +259,7 @@ def _prompt_missing_init_values(
     ]
     deploy_target = _safe_ask(
         questionary.select,
-        "Deployment target",
+        "Deployment target: ",
         choices=deploy_target_choices,
         default=deploy_target,
     )
@@ -267,11 +267,11 @@ def _prompt_missing_init_values(
     # 4. AZURE / GCP-REGION / GCP-PROJECT-ID (only if relevant deploy)
     if deploy_target == "azure":
         azure_region = _safe_ask(
-            questionary.text, "Azure region", default=azure_region,
+            questionary.text, "Azure region: ", default=azure_region,
         ).strip() or azure_region
     elif deploy_target.startswith("gcp-"):
         gcp_region = _safe_ask(
-            questionary.text, "GCP region", default=gcp_region,
+            questionary.text, "GCP region: ", default=gcp_region,
         ).strip() or gcp_region
         # For gcp_project_id, allow Enter to keep the current value
         # but warn if it's empty (migrations from non-GCP deploys won't
@@ -279,7 +279,7 @@ def _prompt_missing_init_values(
         prompt_default = gcp_project_id or ""
         value = _safe_ask(
             questionary.text,
-            f"GCP project ID (required for --deploy={deploy_target})",
+            f"GCP project ID (required for --deploy={deploy_target}): ",
             default=prompt_default,
         ).strip()
         if not value:
@@ -302,7 +302,7 @@ def _prompt_missing_init_values(
     ]
     registry = _safe_ask(
         questionary.select,
-        "Container registry",
+        "Container registry: ",
         choices=registry_choices,
         default=registry,
     )
@@ -310,7 +310,7 @@ def _prompt_missing_init_values(
     # 6. DATABASE (default postgres — prompt to confirm/change)
     db = _safe_ask(
         questionary.select,
-        "Database",
+        "Database: ",
         choices=[Choice(d) for d in _DB_CHOICES],
         default=db,
     )
@@ -327,7 +327,7 @@ def _prompt_missing_init_values(
         if wants_repo:
             while not repo:
                 value = _safe_ask(
-                    questionary.text, "Repo (format: OWNER/NAME)",
+                    questionary.text, "Repo (format: OWNER/NAME): ",
                 ).strip()
                 if "/" in value and not value.startswith("/") and not value.endswith("/"):
                     repo = value
@@ -407,7 +407,7 @@ def _prompt_refresh_overrides(
     ]
     deploy_target = _safe_ask(
         questionary.select,
-        "Deployment target",
+        "Deployment target: ",
         choices=deploy_target_choices,
         default=config.deploy_target,
     )
@@ -422,12 +422,12 @@ def _prompt_refresh_overrides(
     gcp_project_id = config.gcp_project_id
     if deploy_target == "azure":
         value = _safe_ask(
-            questionary.text, "Azure region", default=azure_region,
+            questionary.text, "Azure region: ", default=azure_region,
         ).strip()
         azure_region = value or azure_region
     elif deploy_target.startswith("gcp-"):
         value = _safe_ask(
-            questionary.text, "GCP region", default=gcp_region,
+            questionary.text, "GCP region: ", default=gcp_region,
         ).strip()
         gcp_region = value or gcp_region
         # For gcp_project_id, allow Enter to keep the current value
@@ -436,7 +436,7 @@ def _prompt_refresh_overrides(
         prompt_default = gcp_project_id or ""
         value = _safe_ask(
             questionary.text,
-            f"GCP project ID (required for --deploy={deploy_target})",
+            f"GCP project ID (required for --deploy={deploy_target}): ",
             default=prompt_default,
         ).strip()
         if not value:
@@ -460,7 +460,7 @@ def _prompt_refresh_overrides(
     ]
     registry = _safe_ask(
         questionary.select,
-        "Container registry",
+        "Container registry: ",
         choices=registry_choices,
         default=config.registry,
     )
@@ -484,7 +484,7 @@ def _prompt_refresh_overrides(
     # 5. DATABASE (default = current value)
     db = _safe_ask(
         questionary.select,
-        "Database",
+        "Database: ",
         choices=[Choice(d) for d in _DB_CHOICES],
         default=config.db,
     )
