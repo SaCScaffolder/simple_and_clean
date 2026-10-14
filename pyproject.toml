@@ -28,6 +28,7 @@ dependencies = [
     "jinja2>=3.1",
     "jsonschema>=4.0",  # for `servicectl validate` (issue #50) and ad-hoc spec checks
     "pyyaml>=6.0",
+    "questionary>=2.0,<3.0",  # arrow-key prompts (replaces click.prompt for nicer UX)
     "rich>=13.0",
 ]
 

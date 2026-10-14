@@ -22,7 +22,11 @@ This file pins that contract:
   7. The user can opt in to GitHub repo creation by answering yes and
      supplying OWNER/NAME.
 
-All tests use `CliRunner` with the `input=` kwarg to simulate stdin.
+All tests use `CliRunner` and patch `servicectl.cli._safe_ask`
+(which wraps the questionary prompts) to feed predetermined
+answers. The helper takes a `questionary_answers` dict with three
+keys (`"text"`, `"select"`, `"confirm"`), each a list of values
+popped in order as the prompts fire.
 """
 from __future__ import annotations
 
@@ -57,21 +61,30 @@ FAKE_REPO_RESPONSE = {
 def _run_init_with_input(
     *,
     args: list[str],
-    stdin_input: str,
+    questionary_answers: dict | None = None,
     env: dict | None = None,
     no_input: bool = False,
     mock_create=None,
 ):
-    """Invoke `servicectl init` simulating stdin from `stdin_input`.
+    """Invoke `servicectl init` with a questionary mock answering each
+    prompt in order.
 
-    `stdin_input` is the literal text the user would type; newlines
-    separate answers. The runner uses this as the response to each
-    `click.prompt` call in order.
+    `questionary_answers` is a dict with three optional keys, each a
+    list of predetermined return values:
 
-    The TTY check uses `sys.stdin.isatty()`. In CliRunner, stdin is
-    NOT a TTY (it's a StringIO). So the prompt path doesn't fire by
-    default. We patch `sys.stdin.isatty` to return True when we want
-    to exercise the interactive path; we leave it alone when testing
+      - "text":    answers for `questionary.text` calls (free-text)
+      - "select":  answers for `questionary.select` calls (multiple-choice)
+      - "confirm": answers for `questionary.confirm` calls (y/N)
+
+    Each questionary call pops the next value from the matching list.
+    The order within each list is the order of the prompt in the
+    code under test. Tests that only need to drive one type of
+    prompt can pass just that key.
+
+    The TTY check uses `_stdin_is_tty()`. In CliRunner, stdin is NOT
+    a TTY (it's a StringIO). So the prompt path doesn't fire by
+    default. We patch `_stdin_is_tty` to return True when we want to
+    exercise the interactive path; we leave it alone when testing
     the non-interactive path.
     """
     runner = CliRunner()
@@ -84,6 +97,36 @@ def _run_init_with_input(
     if no_input:
         final_args.append("--no-input")
 
+    answers = questionary_answers or {}
+    text_iter = iter(answers.get("text", []))
+    select_iter = iter(answers.get("select", []))
+    confirm_iter = iter(answers.get("confirm", []))
+
+    def _fake_ask(questionary_fn, *fn_args, **fn_kwargs):
+        """Stub of cli._safe_ask that pops from the right iter.
+
+        Mirrors the real `_safe_ask` shape: it takes the questionary
+        callable as the first arg, plus the same args/kwargs the
+        caller would pass. We don't actually invoke the questionary
+        function; we just return the next predetermined value.
+        """
+        # Heuristic: select takes `choices=`, text doesn't, confirm
+        # takes `default=bool` (close enough). We dispatch on the
+        # function name so tests don't have to be order-perfect
+        # within a single type.
+        name = getattr(questionary_fn, "__name__", "")
+        if name == "select":
+            return next(select_iter)
+        if name == "text":
+            return next(text_iter)
+        if name == "confirm":
+            return next(confirm_iter)
+        # Unknown prompt type: raise to surface the test gap.
+        raise AssertionError(
+            f"_run_init_with_input: unexpected questionary function {name!r}; "
+            f"add it to the helper's dispatch table."
+        )
+
     # Stub out the heavy machinery: ServiceGenerator, github_api,
     # subprocess, and the git-daemon wait. We don't want real git,
     # real GitHub, or real file generation in unit tests of the prompt
@@ -92,7 +135,8 @@ def _run_init_with_input(
     with patch("servicectl.cli.ServiceGenerator") as mock_gen_cls, \
          patch("servicectl.github_api.create_org_repo", return_value=FAKE_REPO_RESPONSE) as mock_create_obj, \
          patch("servicectl.github_api.wait_for_git_daemon", return_value=True), \
-         patch("subprocess.run") as mock_subprocess:
+         patch("subprocess.run") as mock_subprocess, \
+         patch("servicectl.cli._safe_ask", side_effect=_fake_ask):
         from unittest.mock import MagicMock
         mock_gen = MagicMock()
         # ServiceGenerator.run returns a Path; for --in-place that's
@@ -102,7 +146,7 @@ def _run_init_with_input(
         mock_gen.run.return_value = out
         mock_gen_cls.return_value = mock_gen
         mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
-        result = runner.invoke(init, final_args, env=full_env, input=stdin_input, catch_exceptions=False)
+        result = runner.invoke(init, final_args, env=full_env, catch_exceptions=False)
     return result, mock_gen_cls, mock_create_obj, mock_subprocess
 
 
@@ -112,7 +156,6 @@ class TestNoInputFlag:
     def test_no_input_with_no_name_fails_cleanly(self):
         result, _, _, _ = _run_init_with_input(
             args=["--template=go-webapi"],
-            stdin_input="",
             no_input=True,
         )
         assert result.exit_code == 2, f"expected exit 2, got {result.exit_code}. Output:\n{result.output}"
@@ -122,7 +165,6 @@ class TestNoInputFlag:
     def test_no_input_with_no_template_fails_cleanly(self):
         result, _, _, _ = _run_init_with_input(
             args=["my-service"],
-            stdin_input="",
             no_input=True,
         )
         assert result.exit_code == 2
@@ -131,7 +173,6 @@ class TestNoInputFlag:
     def test_no_input_with_gcp_deploy_no_project_id_fails_cleanly(self):
         result, _, _, _ = _run_init_with_input(
             args=["my-service", "--template=go-webapi", "--deploy=gcp-cloud-run"],
-            stdin_input="",
             no_input=True,
         )
         assert result.exit_code == 2
@@ -146,7 +187,6 @@ class TestNoInputFlag:
                 "--deploy=gcp-cloud-run",
                 "--gcp-project-id=my-gcp-proj",
             ],
-            stdin_input="",
             no_input=True,
         )
         assert result.exit_code == 0, f"Output:\n{result.output}"
@@ -161,7 +201,6 @@ class TestNonTTYBehavior:
         # non-interactive error path when a required value is missing.
         result, _, _, _ = _run_init_with_input(
             args=["--template=go-webapi"],
-            stdin_input="",  # no interactive answers consumed
         )
         assert result.exit_code == 2
         assert "'name' is required" in result.output
@@ -169,7 +208,6 @@ class TestNonTTYBehavior:
     def test_piped_stdin_fails_when_template_missing(self):
         result, _, _, _ = _run_init_with_input(
             args=["my-service"],
-            stdin_input="",
         )
         assert result.exit_code == 2
         assert "--template is required" in result.output
@@ -217,24 +255,23 @@ class TestPromptFlow:
                  patch("servicectl.github_api.create_org_repo", return_value=FAKE_REPO_RESPONSE), \
                  patch("servicectl.github_api.wait_for_git_daemon", return_value=True), \
                  patch("subprocess.run") as mock_subprocess, \
-                 patch("servicectl.cli._stdin_is_tty", return_value=True):
+                 patch("servicectl.cli._stdin_is_tty", return_value=True), \
+                 patch("servicectl.cli._safe_ask", side_effect=[
+                     "my-service",                  # name (text)
+                     "go-webapi",                   # template (select)
+                     "local",                       # deploy (select, default)
+                     "ghcr",                        # registry (select, default)
+                     "postgres",                    # db (select, default)
+                     False,                         # create repo? (confirm, no)
+                 ]):
                 from unittest.mock import MagicMock
                 mock_gen = MagicMock()
                 mock_gen.run.return_value = out
                 mock_gen_cls.return_value = mock_gen
                 mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
-                # Input sequence (one per line, in order of prompts):
-                # 1. name = "my-service"
-                # 2. template = "go-webapi"
-                # 3. deploy target = "" (accept default "local")
-                # 4. registry = "" (accept default "ghcr")
-                # 5. db = "" (accept default "postgres")
-                # 6. create GitHub repo? = "n" (decline)
-                input_str = "my-service\ngo-webapi\n\n\n\nn\n"
                 result = runner.invoke(
                     init,
                     ["--output-dir", str(out)],
-                    input=input_str,
                     catch_exceptions=False,
                 )
         assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
@@ -258,23 +295,22 @@ class TestPromptFlow:
                  patch("servicectl.github_api.create_org_repo", return_value=FAKE_REPO_RESPONSE), \
                  patch("servicectl.github_api.wait_for_git_daemon", return_value=True), \
                  patch("subprocess.run") as mock_subprocess, \
-                 patch("servicectl.cli._stdin_is_tty", return_value=True):
+                 patch("servicectl.cli._stdin_is_tty", return_value=True), \
+                 patch("servicectl.cli._safe_ask", side_effect=[
+                     "my-service",                  # name (text)
+                     "local",                       # deploy (select, default)
+                     "ghcr",                        # registry (select, default)
+                     "postgres",                    # db (select, default)
+                     False,                         # create repo? (no)
+                 ]):
                 from unittest.mock import MagicMock
                 mock_gen = MagicMock()
                 mock_gen.run.return_value = out
                 mock_gen_cls.return_value = mock_gen
                 mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
-                # Input sequence (only name is missing):
-                # 1. name = "my-service"
-                # 2. deploy target = "" (accept default)
-                # 3. registry = "" (accept default)
-                # 4. db = "" (accept default)
-                # 5. create GitHub repo? = "n"
-                input_str = "my-service\n\n\n\nn\n"
                 result = runner.invoke(
                     init,
                     ["--template=python-flask", "--output-dir", str(out)],
-                    input=input_str,
                     catch_exceptions=False,
                 )
         assert result.exit_code == 0, f"Output:\n{result.output}"
@@ -294,26 +330,25 @@ class TestPromptFlow:
                  patch("servicectl.github_api.create_org_repo", return_value=FAKE_REPO_RESPONSE), \
                  patch("servicectl.github_api.wait_for_git_daemon", return_value=True), \
                  patch("subprocess.run") as mock_subprocess, \
-                 patch("servicectl.cli._stdin_is_tty", return_value=True):
+                 patch("servicectl.cli._stdin_is_tty", return_value=True), \
+                 patch("servicectl.cli._safe_ask", side_effect=[
+                     "my-service",                  # name (text)
+                     "go-webapi",                   # template (select)
+                     "gcp-cloud-run",               # deploy (select, override)
+                     "us-central1",                 # gcp_region (text, default)
+                     "my-test-project",             # gcp_project_id (text)
+                     "ghcr",                        # registry (select, default)
+                     "postgres",                    # db (select, default)
+                     False,                         # create repo? (no)
+                 ]):
                 from unittest.mock import MagicMock
                 mock_gen = MagicMock()
                 mock_gen.run.return_value = out
                 mock_gen_cls.return_value = mock_gen
                 mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
-                # Input sequence:
-                # 1. name = "my-service"
-                # 2. template = "go-webapi"
-                # 3. deploy target = "gcp-cloud-run" (override default)
-                # 4. GCP region = "" (accept default "us-central1")
-                # 5. GCP project ID = "my-test-project"
-                # 6. registry = "" (accept default)
-                # 7. db = "" (accept default)
-                # 8. create GitHub repo? = "n"
-                input_str = "my-service\ngo-webapi\ngcp-cloud-run\n\nmy-test-project\n\n\nn\n"
                 result = runner.invoke(
                     init,
                     ["--output-dir", str(out)],
-                    input=input_str,
                     catch_exceptions=False,
                 )
         assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
@@ -343,13 +378,20 @@ class TestPromptFlow:
                 # 1. name, 2. template, 3. deploy=azure,
                 # 4. azure region = "westus2" (override default)
                 # 5. registry (default), 6. db (default), 7. no GitHub
-                input_str = "my-service\ngo-webapi\nazure\nwestus2\n\n\nn\n"
-                result = runner.invoke(
-                    init,
-                    ["--output-dir", str(out)],
-                    input=input_str,
-                    catch_exceptions=False,
-                )
+                with patch("servicectl.cli._safe_ask", side_effect=[
+                    "my-service",                  # name (text)
+                    "go-webapi",                   # template (select)
+                    "azure",                       # deploy (select, override)
+                    "westus2",                     # azure_region (text, override)
+                    "ghcr",                        # registry (select, default)
+                    "postgres",                    # db (select, default)
+                    False,                         # create repo? (no)
+                ]):
+                    result = runner.invoke(
+                        init,
+                        ["--output-dir", str(out)],
+                        catch_exceptions=False,
+                    )
         assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
         gen_call = mock_gen_cls.call_args
         assert gen_call.kwargs["azure_region"] == "westus2"
@@ -376,14 +418,22 @@ class TestPromptFlow:
                 # 6. create GitHub repo? = "y"
                 # 7. OWNER/NAME = "TestOrg/my-service"
                 # 8. private? = "n"
-                input_str = "my-service\ngo-webapi\n\n\n\ny\nTestOrg/my-service\nn\n"
-                result = runner.invoke(
-                    init,
-                    ["--output-dir", str(out)],
-                    input=input_str,
-                    env={"GH_TOKEN": "ghp_test_token"},
-                    catch_exceptions=False,
-                )
+                with patch("servicectl.cli._safe_ask", side_effect=[
+                    "my-service",                  # name (text)
+                    "go-webapi",                   # template (select)
+                    "local",                       # deploy (select, default)
+                    "ghcr",                        # registry (select, default)
+                    "postgres",                    # db (select, default)
+                    True,                          # create repo? (yes)
+                    "TestOrg/my-service",          # repo (text)
+                    False,                         # private? (no)
+                ]):
+                    result = runner.invoke(
+                        init,
+                        ["--output-dir", str(out)],
+                        env={"GH_TOKEN": "ghp_test_token"},
+                        catch_exceptions=False,
+                    )
         assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
         assert mock_create.call_count == 1
         assert mock_create.call_args.args[0] == "TestOrg"
@@ -405,14 +455,22 @@ class TestPromptFlow:
                 mock_gen.run.return_value = out
                 mock_gen_cls.return_value = mock_gen
                 mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
-                input_str = "my-service\ngo-webapi\n\n\n\ny\nTestOrg/my-service\ny\n"
-                result = runner.invoke(
-                    init,
-                    ["--output-dir", str(out)],
-                    input=input_str,
-                    env={"GH_TOKEN": "ghp_test_token"},
-                    catch_exceptions=False,
-                )
+                with patch("servicectl.cli._safe_ask", side_effect=[
+                    "my-service",                  # name (text)
+                    "go-webapi",                   # template (select)
+                    "local",                       # deploy (select, default)
+                    "ghcr",                        # registry (select, default)
+                    "postgres",                    # db (select, default)
+                    True,                          # create repo? (yes)
+                    "TestOrg/my-service",          # repo (text)
+                    True,                          # private? (yes)
+                ]):
+                    result = runner.invoke(
+                        init,
+                        ["--output-dir", str(out)],
+                        env={"GH_TOKEN": "ghp_test_token"},
+                        catch_exceptions=False,
+                    )
         assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
         assert mock_create.call_args.kwargs["private"] is True
 

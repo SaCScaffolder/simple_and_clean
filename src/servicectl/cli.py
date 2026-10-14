@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 
 import click
+import questionary
+from questionary import Choice
 from rich.console import Console
 from rich.panel import Panel
 
@@ -76,6 +78,31 @@ console = Console(legacy_windows=not _HAS_VT, safe_box=False)
 err_console = Console(
     stderr=True, style="bold red", legacy_windows=not _HAS_VT, safe_box=False,
 )
+
+
+def _safe_ask(questionary_fn, *args, **kwargs):
+    """Run a questionary prompt with our abort handling.
+
+    questionary's `.ask()` returns ``None`` on Ctrl-C / EOF / abort.
+    We translate that into the same "aborted." + ``sys.exit(1)``
+    pattern the rest of the CLI uses, so callers don't have to
+    special-case ``None``.
+
+    For ``questionary.select`` the result is the chosen ``Choice``
+    value (or the raw string if you passed plain strings). For
+    ``questionary.text`` it's the typed string. For
+    ``questionary.confirm`` it's ``True`` / ``False``. The caller
+    picks the right questionary function for the prompt shape and
+    gets the right return type out.
+    """
+    try:
+        result = questionary_fn(*args, **kwargs).ask()
+    except (KeyboardInterrupt, EOFError):
+        result = None
+    if result is None:
+        err_console.print("\n[yellow]aborted.[/yellow]")
+        sys.exit(1)
+    return result
 
 
 def _write_askpass(token: str) -> str:
@@ -187,121 +214,128 @@ def _prompt_missing_init_values(
     """
     from .templates import TEMPLATES as _TEMPLATES  # local import; click decorator runs at import time
 
-    def _safe_prompt(*args, **kwargs):
-        """Click prompt that maps EOF / KeyboardInterrupt to a clean exit."""
-        try:
-            return click.prompt(*args, **kwargs)
-        except (click.Abort, EOFError, KeyboardInterrupt):
-            err_console.print("\n[yellow]aborted.[/yellow]")
-            sys.exit(1)
-
-    def _safe_confirm(*args, **kwargs):
-        try:
-            return click.confirm(*args, **kwargs)
-        except (click.Abort, EOFError, KeyboardInterrupt):
-            err_console.print("\n[yellow]aborted.[/yellow]")
-            sys.exit(1)
-
     # 1. NAME (always prompt if missing — required, no good default)
     if not name:
         console.print(
             Panel(
                 "[bold]Welcome to servicectl![/bold]\n\n"
-                "Let's scaffold a new service. I'll ask a few questions; you can "
-                "press Enter to accept the default shown in [cyan][brackets][/cyan].",
+                "Let's scaffold a new service. I'll ask a few questions; "
+                "for the multiple-choice ones, use ↑/↓ to pick and Enter "
+                "to confirm. For the typed ones, the default is shown in "
+                "[cyan][brackets][/cyan] — press Enter to accept.",
                 border_style="cyan",
             )
         )
         while not name:
-            name = _safe_prompt("Service name", type=str).strip()
+            name = _safe_ask(
+                questionary.text, "Service name",
+            ).strip()
             if not name:
                 console.print("[yellow]name cannot be empty[/yellow]")
 
     # 2. TEMPLATE (always prompt if missing — required, choice)
-        console.print("\n[bold]Template[/bold] — which service framework?")
-        for tid, desc in _TEMPLATES.items():
-            console.print(f"  [cyan]{tid:<18}[/cyan] {desc}")
-        while not template:
-            value = _safe_prompt("Template id", type=click.Choice(list(_TEMPLATES.keys()), case_sensitive=False), show_choices=False).strip()
-            if value:
-                template = value
+    if not template:
+        template_choices = [
+            Choice(tid, description=desc) for tid, desc in _TEMPLATES.items()
+        ]
+        template = _safe_ask(
+            questionary.select,
+            "Template — which service framework?",
+            choices=template_choices,
+        )
 
     # 3. DEPLOY TARGET (default local — prompt to confirm/change)
-    # Click Choice shows the default in the prompt; if user just hits
-    # Enter, it accepts the default. So we always prompt here.
-    console.print("\n[bold]Deployment target[/bold]")
+    # questionary.select with a `default` that matches a Choice value
+    # pre-selects that choice. The user can still change it with arrows.
     deploy_labels = {
-        "local": "local — no remote cloud; just Dockerfile + docker-compose",
-        "azure": "azure — Azure App Service (Linux) + Container Registry",
-        "gcp-cloud-run": "gcp-cloud-run — Google Cloud Run (serverless)",
-        "gcp-gke-autopilot": "gcp-gke-autopilot — GKE Autopilot (managed k8s)",
+        "local": "no remote cloud; just Dockerfile + docker-compose",
+        "azure": "Azure App Service (Linux) + Container Registry",
+        "gcp-cloud-run": "Google Cloud Run (serverless)",
+        "gcp-gke-autopilot": "GKE Autopilot (managed k8s)",
     }
-    for d in _DEPLOY_TARGET_CHOICES:
-        console.print(f"  [cyan]{d:<22}[/cyan] {deploy_labels.get(d, '')}")
-    deploy_target = _safe_prompt(
-        "Deploy target",
-        type=click.Choice(_DEPLOY_TARGET_CHOICES, case_sensitive=False),
+    deploy_target_choices = [
+        Choice(d, description=deploy_labels.get(d, ""))
+        for d in _DEPLOY_TARGET_CHOICES
+    ]
+    deploy_target = _safe_ask(
+        questionary.select,
+        "Deployment target",
+        choices=deploy_target_choices,
         default=deploy_target,
-        show_choices=False,
     )
 
     # 4. AZURE / GCP-REGION / GCP-PROJECT-ID (only if relevant deploy)
     if deploy_target == "azure":
-        azure_region = _safe_prompt("Azure region", default=azure_region)
+        azure_region = _safe_ask(
+            questionary.text, "Azure region", default=azure_region,
+        ).strip() or azure_region
     elif deploy_target.startswith("gcp-"):
-        gcp_region = _safe_prompt("GCP region", default=gcp_region)
-        while not gcp_project_id:
-            value = _safe_prompt(
-                f"GCP project ID (required for --deploy={deploy_target})",
-                type=str,
-            ).strip()
-            if value:
-                gcp_project_id = value
-            else:
-                console.print("[yellow]GCP project ID cannot be empty for gcp- deploys[/yellow]")
+        gcp_region = _safe_ask(
+            questionary.text, "GCP region", default=gcp_region,
+        ).strip() or gcp_region
+        # For gcp_project_id, allow Enter to keep the current value
+        # but warn if it's empty (migrations from non-GCP deploys won't
+        # have one set).
+        prompt_default = gcp_project_id or ""
+        value = _safe_ask(
+            questionary.text,
+            f"GCP project ID (required for --deploy={deploy_target})",
+            default=prompt_default,
+        ).strip()
+        if not value:
+            console.print(
+                f"[yellow]warning:[/yellow] GCP project ID is empty; the next "
+                f"CI run with --deploy={deploy_target} will fail until you "
+                f"set it in .servicectl.json (or re-run init)."
+            )
+        gcp_project_id = value or None
 
     # 5. REGISTRY (default ghcr — prompt to confirm/change)
-    console.print("\n[bold]Container registry[/bold]")
-    for r in _REGISTRY_CHOICES:
-        note = ""
-        if r == "gar":
-            note = " (recommended for GCP deploys)"
-        elif r == "gcr":
-            note = " (legacy; prefer gar)"
-        elif r == "ghcr":
-            note = " (default; works with GitHub Actions)"
-        console.print(f"  [cyan]{r:<12}[/cyan]{note}")
-    registry = _safe_prompt(
-        "Registry",
-        type=click.Choice(_REGISTRY_CHOICES, case_sensitive=False),
+    registry_notes = {
+        "gar": " (recommended for GCP deploys)",
+        "gcr": " (legacy; prefer gar)",
+        "ghcr": " (default; works with GitHub Actions)",
+    }
+    registry_choices = [
+        Choice(r, description=registry_notes.get(r, "").strip())
+        for r in _REGISTRY_CHOICES
+    ]
+    registry = _safe_ask(
+        questionary.select,
+        "Container registry",
+        choices=registry_choices,
         default=registry,
-        show_choices=False,
     )
 
     # 6. DATABASE (default postgres — prompt to confirm/change)
-    db = _safe_prompt(
+    db = _safe_ask(
+        questionary.select,
         "Database",
-        type=click.Choice(_DB_CHOICES, case_sensitive=False),
+        choices=[Choice(d) for d in _DB_CHOICES],
         default=db,
-        show_choices=False,
     )
 
     # 7. GITHUB REPO CREATION (yes/no prompt; if yes, ask for owner/name)
     # The user can skip this (it defaults to no), or if they already
     # passed --repo on the command line we don't re-ask.
     if repo is None:
-        wants_repo = _safe_confirm("Create a GitHub repo for this service now?", default=False)
+        wants_repo = _safe_ask(
+            questionary.confirm,
+            "Create a GitHub repo for this service now?",
+            default=False,
+        )
         if wants_repo:
             while not repo:
-                value = _safe_prompt(
-                    "Repo (format: OWNER/NAME)",
-                    type=str,
+                value = _safe_ask(
+                    questionary.text, "Repo (format: OWNER/NAME)",
                 ).strip()
                 if "/" in value and not value.startswith("/") and not value.endswith("/"):
                     repo = value
                 else:
                     console.print("[yellow]must be in OWNER/NAME format (e.g. SaCScaffolder/my-service)[/yellow]")
-            repo_private = _safe_confirm("Make this repo private?", default=False)
+            repo_private = _safe_ask(
+                questionary.confirm, "Make this repo private?", default=False,
+            )
         # else repo stays None and we proceed without GitHub repo creation
 
     return (name, template, deploy_target, azure_region, gcp_region, gcp_project_id, registry, db, repo, repo_private)
@@ -347,48 +381,35 @@ def _prompt_refresh_overrides(
     """
     from .templates import TEMPLATES as _TEMPLATES  # local import; see _prompt_missing_init_values
 
-    def _safe_prompt(*args, **kwargs):
-        try:
-            return click.prompt(*args, **kwargs)
-        except (click.Abort, EOFError, KeyboardInterrupt):
-            err_console.print("\n[yellow]aborted.[/yellow]")
-            sys.exit(1)
-
-    def _safe_confirm(*args, **kwargs):
-        try:
-            return click.confirm(*args, **kwargs)
-        except (click.Abort, EOFError, KeyboardInterrupt):
-            err_console.print("\n[yellow]aborted.[/yellow]")
-            sys.exit(1)
-
     # 1. TEMPLATE (default = current value; choice of TEMPLATES)
-    console.print("\n[bold]Template[/bold] — which service framework?")
-    for tid, desc in _TEMPLATES.items():
-        marker = " [cyan](current)[/cyan]" if tid == config.template else ""
-        console.print(f"  [cyan]{tid:<18}[/cyan] {desc}{marker}")
-    template = _safe_prompt(
-        "Template id",
-        type=click.Choice(list(_TEMPLATES.keys()), case_sensitive=False),
+    # questionary.select shows the current value pre-highlighted via
+    # the `default` kwarg (matched against Choice values).
+    template_choices = [
+        Choice(tid, description=desc) for tid, desc in _TEMPLATES.items()
+    ]
+    template = _safe_ask(
+        questionary.select,
+        "Template — which service framework?",
+        choices=template_choices,
         default=config.template,
-        show_choices=False,
     )
 
     # 2. DEPLOY TARGET (default = current value)
-    console.print("\n[bold]Deployment target[/bold]")
     deploy_labels = {
-        "local": "local — no remote cloud; just Dockerfile + docker-compose",
-        "azure": "azure — Azure App Service (Linux) + Container Registry",
-        "gcp-cloud-run": "gcp-cloud-run — Google Cloud Run (serverless)",
-        "gcp-gke-autopilot": "gcp-gke-autopilot — GKE Autopilot (managed k8s)",
+        "local": "no remote cloud; just Dockerfile + docker-compose",
+        "azure": "Azure App Service (Linux) + Container Registry",
+        "gcp-cloud-run": "Google Cloud Run (serverless)",
+        "gcp-gke-autopilot": "GKE Autopilot (managed k8s)",
     }
-    for d in _DEPLOY_TARGET_CHOICES:
-        marker = " [cyan](current)[/cyan]" if d == config.deploy_target else ""
-        console.print(f"  [cyan]{d:<22}[/cyan] {deploy_labels.get(d, '')}{marker}")
-    deploy_target = _safe_prompt(
-        "Deploy target",
-        type=click.Choice(_DEPLOY_TARGET_CHOICES, case_sensitive=False),
+    deploy_target_choices = [
+        Choice(d, description=deploy_labels.get(d, ""))
+        for d in _DEPLOY_TARGET_CHOICES
+    ]
+    deploy_target = _safe_ask(
+        questionary.select,
+        "Deployment target",
+        choices=deploy_target_choices,
         default=config.deploy_target,
-        show_choices=False,
     )
 
     # 3. REGION / PROJECT — only prompt for the ones the new target uses.
@@ -400,16 +421,22 @@ def _prompt_refresh_overrides(
     gcp_region = config.gcp_region
     gcp_project_id = config.gcp_project_id
     if deploy_target == "azure":
-        azure_region = _safe_prompt("Azure region", default=azure_region)
+        value = _safe_ask(
+            questionary.text, "Azure region", default=azure_region,
+        ).strip()
+        azure_region = value or azure_region
     elif deploy_target.startswith("gcp-"):
-        gcp_region = _safe_prompt("GCP region", default=gcp_region)
+        value = _safe_ask(
+            questionary.text, "GCP region", default=gcp_region,
+        ).strip()
+        gcp_region = value or gcp_region
         # For gcp_project_id, allow Enter to keep the current value
         # but warn if it's empty (migrations from non-GCP deploys won't
         # have one set).
         prompt_default = gcp_project_id or ""
-        value = _safe_prompt(
+        value = _safe_ask(
+            questionary.text,
             f"GCP project ID (required for --deploy={deploy_target})",
-            type=str,
             default=prompt_default,
         ).strip()
         if not value:
@@ -422,22 +449,20 @@ def _prompt_refresh_overrides(
         gcp_project_id = value or None
 
     # 4. REGISTRY (default = current value; print GAR image path if gar)
-    console.print("\n[bold]Container registry[/bold]")
-    for r in _REGISTRY_CHOICES:
-        note = ""
-        if r == "gar":
-            note = " (recommended for GCP deploys)"
-        elif r == "gcr":
-            note = " (legacy; prefer gar)"
-        elif r == "ghcr":
-            note = " (default; works with GitHub Actions)"
-        marker = " [cyan](current)[/cyan]" if r == config.registry else ""
-        console.print(f"  [cyan]{r:<12}[/cyan]{note}{marker}")
-    registry = _safe_prompt(
-        "Registry",
-        type=click.Choice(_REGISTRY_CHOICES, case_sensitive=False),
+    registry_notes = {
+        "gar": "recommended for GCP deploys",
+        "gcr": "legacy; prefer gar",
+        "ghcr": "default; works with GitHub Actions",
+    }
+    registry_choices = [
+        Choice(r, description=registry_notes.get(r, ""))
+        for r in _REGISTRY_CHOICES
+    ]
+    registry = _safe_ask(
+        questionary.select,
+        "Container registry",
+        choices=registry_choices,
         default=config.registry,
-        show_choices=False,
     )
 
     # 4a. GCP exposure: if the user picked gar, show the resolved
@@ -457,11 +482,11 @@ def _prompt_refresh_overrides(
         )
 
     # 5. DATABASE (default = current value)
-    db = _safe_prompt(
+    db = _safe_ask(
+        questionary.select,
         "Database",
-        type=click.Choice(_DB_CHOICES, case_sensitive=False),
+        choices=[Choice(d) for d in _DB_CHOICES],
         default=config.db,
-        show_choices=False,
     )
 
     # Build a new SacConfig preserving the non-prompted fields. We
@@ -1256,12 +1281,12 @@ def modify(
         return
 
     if not yes:
-        console.print(f"\nApply these changes to {path}? [y/N]")
-        try:
-            response = input().strip().lower()
-        except EOFError:
-            response = "n"
-        if response != "y":
+        proceed = _safe_ask(
+            questionary.confirm,
+            f"Apply these changes to {path}?",
+            default=False,
+        )
+        if not proceed:
             console.print("[yellow]Aborted; no files written.[/yellow]")
             return
 
@@ -1609,17 +1634,13 @@ def refresh(
                 f"  recovery ref:   {run.recovery_ref}\n"
                 f"  developer commits: {len(run.developer_commits)}\n\n"
                 f"The worktree branch will be fast-forwarded into {run.base_branch} on success.\n"
-                f"On conflict, {run.recovery_ref} lets you roll back.\n\n"
-                f"Proceed? [y/N]",
+                f"On conflict, {run.recovery_ref} lets you roll back.",
                 title="refresh confirmation",
                 border_style="yellow",
             )
         )
-        try:
-            response = input().strip().lower()
-        except EOFError:
-            response = "n"
-        if response != "y":
+        proceed = _safe_ask(questionary.confirm, "Proceed?", default=False)
+        if not proceed:
             console.print("[yellow]Aborted; no changes made.[/yellow]")
             return
 
@@ -1828,14 +1849,15 @@ def _offer_post_refresh_merge(
         return
 
     console.print(
-        f"\n[bold]Would you like me to merge {run.branch_name} into "
-        f"{run.base_branch} and clean up the worktree?[/bold] [y/N]"
+        f"\n[bold]Refresh succeeded.[/bold] {run.branch_name} is ready "
+        f"to fast-forward into {run.base_branch}."
     )
-    try:
-        response = input().strip().lower()
-    except EOFError:
-        response = "n"
-    if response == "y":
+    merge = _safe_ask(
+        questionary.confirm,
+        f"Merge {run.branch_name} into {run.base_branch} and clean up the worktree?",
+        default=False,
+    )
+    if merge:
         _merge_and_cleanup_worktree(
             run.source_repo, run.base_branch, run.branch_name, run.worktree_dir
         )
