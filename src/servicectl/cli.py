@@ -18,7 +18,6 @@ from pathlib import Path
 import click
 from rich.console import Console
 from rich.panel import Panel
-from rich import box as _rich_box  # ASCII panels render in legacy Windows hosts (PowerShell 5 / pwsh conhost)
 
 from . import __version__
 from . import github_api
@@ -191,7 +190,6 @@ def _prompt_missing_init_values(
                 "Let's scaffold a new service. I'll ask a few questions; you can "
                 "press Enter to accept the default shown in [cyan][brackets][/cyan].",
                 border_style="cyan",
-                box=_rich_box.ASCII,
             )
         )
         while not name:
@@ -1118,7 +1116,6 @@ def init(
             + f"  {deploy_hint}",
             title="service scaffolded",
             border_style="green",
-            box=_rich_box.ASCII,
         )
     )
 
@@ -1184,7 +1181,6 @@ def modify(
                 f"  db:          {mod.current_db or 'unknown'}\n",
                 title=f"settings for {path}",
                 border_style="cyan",
-                box=_rich_box.ASCII,
             )
         )
         return
@@ -1441,7 +1437,6 @@ def refresh(
                 f"[brackets][/cyan]; press Enter to keep, or type a new "
                 f"value to change.",
                 border_style="cyan",
-                box=_rich_box.ASCII,
             )
         )
         new_config = _prompt_refresh_overrides(config=current_config)
@@ -1479,7 +1474,6 @@ def refresh(
                     f"  recover with:  git update-ref refs/heads/<branch> {e.recovery_ref}",
                     title="refresh failed",
                     border_style="red",
-                    box=_rich_box.ASCII,
                 )
             )
             sys.exit(2)
@@ -1510,7 +1504,6 @@ def refresh(
                     f"  recovery ref: [cyan]{e.recovery_ref}[/cyan]",
                     title="resolution failed",
                     border_style="red",
-                    box=_rich_box.ASCII,
                 )
             )
             sys.exit(2)
@@ -1534,7 +1527,6 @@ def refresh(
                     f"  recovery ref: [cyan]{e.recovery_ref}[/cyan]",
                     title="resolution failed",
                     border_style="red",
-                    box=_rich_box.ASCII,
                 )
             )
             sys.exit(2)
@@ -1552,7 +1544,6 @@ def refresh(
                 f"Next: wait for the PR to merge, then re-run refresh.",
                 title="refresh conflict resolved",
                 border_style="green",
-                box=_rich_box.ASCII,
             )
         )
         return
@@ -1585,7 +1576,6 @@ def refresh(
                 f"  servicectl refresh {repo}    # for real",
                 title="refresh plan",
                 border_style="cyan",
-                box=_rich_box.ASCII,
             )
         )
         return
@@ -1603,7 +1593,6 @@ def refresh(
                 f"Proceed? [y/N]",
                 title="refresh confirmation",
                 border_style="yellow",
-                box=_rich_box.ASCII,
             )
         )
         try:
@@ -1625,7 +1614,6 @@ def refresh(
                 f"The worktree is ready to merge or fast-forward into {run.base_branch}.",
                 title="refresh succeeded",
                 border_style="green",
-                box=_rich_box.ASCII,
             )
         )
         # Post-refresh: offer to merge the worktree branch into the
