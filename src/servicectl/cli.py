@@ -1350,7 +1350,30 @@ def doctor(path: Path, strict: bool, as_json: bool, pause: bool) -> None:
         "the value-collection prompts."
     ),
 )
-def refresh(repo: Path, dry_run: bool, yes: bool, resolve_on_conflict: bool, no_input: bool) -> None:
+@click.option(
+    "--auto-merge/--no-auto-merge",
+    "auto_merge",
+    default=None,  # None means "prompt the user" (the default UX).
+    help=(
+        "After a successful refresh, fast-forward the source repo's "
+        "base branch into the refresh worktree's branch, then remove "
+        "the worktree. Default UX is to ask you (y/N) whether to do "
+        "this. Use --auto-merge to say yes without asking, or "
+        "--no-auto-merge to say no without asking. Conflicts (non-FF) "
+        "are reported and the worktree is preserved so you can resolve "
+        "manually. Implies --yes when --auto-merge is given."
+    ),
+)
+
+
+def refresh(
+    repo: Path,
+    dry_run: bool,
+    yes: bool,
+    resolve_on_conflict: bool,
+    no_input: bool,
+    auto_merge: bool | None,
+) -> None:
     """Refresh an existing scaffolded service against the current simple_and_clean.
 
     Classifies the repo's commits into SAC-managed (filtered out) and
@@ -1605,6 +1628,12 @@ def refresh(repo: Path, dry_run: bool, yes: bool, resolve_on_conflict: bool, no_
                 box=_rich_box.ASCII,
             )
         )
+        # Post-refresh: offer to merge the worktree branch into the
+        # base branch and clean up. The user can answer y/N here, or
+        # have pre-decided via --auto-merge / --no-merge. The same
+        # panel of git commands is shown either way so the user can
+        # copy-paste if they decline.
+        _offer_post_refresh_merge(run, auto_merge=auto_merge, no_input=no_input)
     else:
         # Defensive: replay_refresh() raises on failure, so we shouldn't get
         # here. If we do, surface it cleanly.
@@ -1614,6 +1643,201 @@ def refresh(repo: Path, dry_run: bool, yes: bool, resolve_on_conflict: bool, no_
         )
         sys.exit(2)
 
+
+def _merge_and_cleanup_worktree(
+    source_repo: Path,
+    base_branch: str,
+    branch_name: str,
+    worktree_dir: Path,
+) -> bool:
+    """Fast-forward `base_branch` into `branch_name` and clean up.
+
+    Returns True on full success, False if any step failed (in which
+    case the worktree is preserved so the user can investigate). Each
+    step prints its own status so the user can see exactly what
+    happened.
+
+    The merge uses `--ff-only` so a non-fast-forward (e.g. someone
+    else pushed to main while refresh was running) surfaces as a
+    clear error rather than creating a surprise merge commit. On
+    non-FF, the worktree branch is left in place; the user can rebase
+    and re-run, or merge manually with a real merge commit.
+    """
+    console.print(
+        f"\n[bold]Merging {branch_name} into {base_branch}[/bold]"
+    )
+
+    # Step 1: fast-forward merge.
+    try:
+        merge_result = subprocess.run(
+            ["git", "-C", str(source_repo), "merge", "--ff-only", branch_name],
+            capture_output=True,
+            text=True,
+            check=False,  # we'll inspect the result ourselves
+        )
+    except FileNotFoundError:
+        err_console.print(
+            "[bold red]error:[/bold red] `git` not found on PATH; "
+            "can't auto-merge. Run the commands below by hand."
+        )
+        return False
+
+    if merge_result.returncode != 0:
+        err_console.print(
+            Panel(
+                f"[bold red]merge failed[/bold red]\n\n"
+                f"  {merge_result.stderr.strip() or '(no stderr)'}\n\n"
+                f"The worktree is preserved at [cyan]{worktree_dir}[/cyan] "
+                f"on branch [cyan]{branch_name}[/cyan]. You can:\n"
+                f"  - rebase onto current {base_branch} and re-run refresh, or\n"
+                f"  - merge with a real merge commit (drop --ff-only), or\n"
+                f"  - inspect the diff and discard with:\n"
+                f"      git worktree remove {worktree_dir}\n"
+                f"      git branch -D {branch_name}",
+                border_style="red",
+                box=_rich_box.ASCII,
+            )
+        )
+        return False
+    console.print(f"  [green]merged[/green] {branch_name} into {base_branch}")
+
+    # Step 2: remove the worktree.
+    wt_result = subprocess.run(
+        ["git", "-C", str(source_repo), "worktree", "remove", str(worktree_dir), "--force"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if wt_result.returncode != 0:
+        err_console.print(
+            Panel(
+                f"[bold yellow]merge OK, worktree cleanup failed[/bold yellow]\n\n"
+                f"  {wt_result.stderr.strip() or '(no stderr)'}\n\n"
+                f"Your branch is updated, but the worktree is still at:\n"
+                f"  [cyan]{worktree_dir}[/cyan]\n\n"
+                f"Remove it by hand with:\n"
+                f"  git worktree remove {worktree_dir} --force",
+                border_style="yellow",
+                box=_rich_box.ASCII,
+            )
+        )
+        return False
+    console.print(f"  [green]removed[/green] worktree at {worktree_dir}")
+
+    # Step 3: delete the refresh branch. We use -d (safe-delete)
+    # which only succeeds if the branch is fully merged; since we
+    # just --ff-only'd it, the branch is fully merged, so -d works.
+    branch_result = subprocess.run(
+        ["git", "-C", str(source_repo), "branch", "-d", branch_name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if branch_result.returncode != 0:
+        # -d refused (which would mean the branch isn't fully merged,
+        # which shouldn't happen post --ff-only). Surface but don't
+        # fail; the merge + worktree cleanup already succeeded.
+        err_console.print(
+            f"[bold yellow]warning:[/bold yellow] couldn't delete branch "
+            f"{branch_name} (probably still checked out somewhere):\n"
+            f"  {branch_result.stderr.strip() or '(no stderr)'}\n"
+            f"Delete it by hand with: git branch -d {branch_name}"
+        )
+        return False
+    console.print(f"  [green]deleted[/green] branch {branch_name}")
+
+    console.print(
+        f"\n[bold green]All done.[/bold green] {base_branch} is now at "
+        f"the refreshed scaffold. The recovery ref is still in your "
+        f"reflog if you need to roll back."
+    )
+    return True
+
+
+def _print_manual_merge_commands(
+    source_repo: Path,
+    base_branch: str,
+    branch_name: str,
+    worktree_dir: Path,
+) -> None:
+    """Print the git commands for the user to run by hand."""
+    console.print(
+        Panel(
+            f"To land this refresh, run these from [cyan]{source_repo}[/cyan]:\n\n"
+            f"  [bold]git merge --ff-only {branch_name}[/bold]\n"
+            f"  git worktree remove {worktree_dir} --force\n"
+            f"  git branch -d {branch_name}\n\n"
+            f"Or to do a real merge commit instead of fast-forward, drop "
+            f"the --ff-only. The recovery ref is still in your reflog if "
+            f"you need to roll back: refs/sac/pre-refresh-<run_id>.",
+            title=f"merge {branch_name} into {base_branch}",
+            border_style="cyan",
+            box=_rich_box.ASCII,
+        )
+    )
+
+
+def _offer_post_refresh_merge(
+    run,
+    *,
+    auto_merge: bool | None,
+    no_input: bool,
+) -> None:
+    """After a successful refresh, offer to merge + clean up.
+
+    Decision tree:
+      - auto_merge is True  -> do it (no prompt)
+      - auto_merge is False -> print the manual commands (no prompt)
+      - auto_merge is None, TTY, not no_input  -> ask y/N
+      - auto_merge is None, not TTY (or no_input)  -> print manual commands
+
+    The merge helper is conservative: it uses --ff-only and won't
+    silently create merge commits. On failure it leaves the worktree
+    in place and tells you how to recover.
+    """
+    if not run.succeeded:
+        return  # defensive: don't offer to merge a failed refresh
+
+    if not run.branch_name:
+        _print_manual_merge_commands(
+            run.source_repo, run.base_branch, "<unknown-branch>", run.worktree_dir
+        )
+        return
+
+    if auto_merge is False:
+        _print_manual_merge_commands(
+            run.source_repo, run.base_branch, run.branch_name, run.worktree_dir
+        )
+        return
+
+    if auto_merge is True:
+        _merge_and_cleanup_worktree(
+            run.source_repo, run.base_branch, run.branch_name, run.worktree_dir
+        )
+        return
+
+    if no_input or not _stdin_is_tty() or os.environ.get("SERVICECTL_NO_INPUT"):
+        _print_manual_merge_commands(
+            run.source_repo, run.base_branch, run.branch_name, run.worktree_dir
+        )
+        return
+
+    console.print(
+        f"\n[bold]Would you like me to merge {run.branch_name} into "
+        f"{run.base_branch} and clean up the worktree?[/bold] [y/N]"
+    )
+    try:
+        response = input().strip().lower()
+    except EOFError:
+        response = "n"
+    if response == "y":
+        _merge_and_cleanup_worktree(
+            run.source_repo, run.base_branch, run.branch_name, run.worktree_dir
+        )
+    else:
+        _print_manual_merge_commands(
+            run.source_repo, run.base_branch, run.branch_name, run.worktree_dir
+        )
 
 if __name__ == "__main__":
     main()

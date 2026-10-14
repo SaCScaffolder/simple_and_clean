@@ -129,6 +129,7 @@ class RefreshRun:
     worktree_dir: Path
     recovery_ref: str
     base_branch: str
+    branch_name: str = ""  # The worktree's branch (e.g. "sac/refresh/<run_id>"). Set by refresh() so the CLI doesn't need to know the naming convention.
     scaffold_sha: str = ""
     conflicts: list[str] = field(default_factory=list)
     succeeded: bool = False
@@ -336,6 +337,7 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
         worktree_dir=source_repo.parent / f"sac-refresh-{run_id}",
         recovery_ref=recovery_ref,
         base_branch=base_branch,
+        branch_name=branch_name,
         developer_commits=developer_commits,
         config=config,
     )

@@ -107,6 +107,7 @@ def _stub_replay(*, succeeded: bool = True, scaffold_sha: str = "deadbeef"):
             worktree_dir=repo / ".worktree",
             recovery_ref="refs/sac/pre-refresh-test1234",
             base_branch="main",
+            branch_name="sac/refresh/test1234",
             scaffold_sha=scaffold_sha,
             conflicts=[],
             succeeded=succeeded,
@@ -125,6 +126,7 @@ def _run_refresh_with_input(
     env: dict | None = None,
     no_input: bool = False,
     yes: bool = True,  # skip the final y/n prompt by default; tests for that flow can set False
+    no_merge: bool = True,  # skip the post-refresh merge prompt by default; tests for that flow can set False
 ):
     """Invoke `servicectl refresh` against `repo` simulating stdin.
 
@@ -142,6 +144,8 @@ def _run_refresh_with_input(
         final_args.append("--no-input")
     if yes:
         final_args.append("--yes")
+    if no_merge:
+        final_args.append("--no-auto-merge")
 
     with _stub_replay(), \
          patch("subprocess.run") as mock_subprocess:
@@ -287,7 +291,7 @@ class TestNoInputFlag:
             runner = CliRunner()
             # Patch replay.refresh to raise the real error.
             with patch("servicectl.replay.refresh", side_effect=RefreshConfigMissing(f"{repo / '.servicectl.json'} not found.")):
-                result = runner.invoke(refresh, [str(repo), "--no-input", "--yes"], catch_exceptions=False)
+                result = runner.invoke(refresh, [str(repo), "--no-input", "--yes", "--no-auto-merge"], catch_exceptions=False)
         # The CLI converts RefreshConfigMissing to a friendly panel
         # and exits 2.
         assert result.exit_code == 2
@@ -456,3 +460,241 @@ class TestPromptSkipped:
             on_disk = read_config(repo)
         # The piped `gar` was NOT consumed; the on-disk config wins.
         assert on_disk.registry == "ghcr"
+
+
+# ---------------------------------------------------------------------------
+# Tests for the post-refresh auto-merge / --no-merge / --auto-merge flow.
+# ---------------------------------------------------------------------------
+
+class TestAutoMerge:
+    """After a successful refresh, the CLI offers to merge the worktree
+    branch into the base branch. The decision tree (see
+    `_offer_post_refresh_merge` in cli.py):
+
+      --auto-merge:  do the merge + cleanup, no prompt
+      --no-merge:    print the manual commands, no prompt
+      default (TTY): ask y/N
+      default (non-TTY or --no-input): print the manual commands
+
+    We don't shell out to a real git repo in these tests; we stub
+    `subprocess.run` to verify the right git commands are issued in the
+    right order, and the right panels are printed in each branch.
+    """
+
+    def _stub_replay_with_branch(self):
+        """Like _stub_replay, but the stubbed RefreshRun carries
+        branch_name='sac/refresh/test1234' so the merge helper knows
+        what to do."""
+        from servicectl.replay import RefreshRun
+        def _make_run(repo: Path, dry_run: bool = False) -> RefreshRun:
+            return RefreshRun(
+                run_id="test1234",
+                source_repo=repo,
+                worktree_dir=repo / ".worktree",
+                recovery_ref="refs/sac/pre-refresh-test1234",
+                base_branch="main",
+                branch_name="sac/refresh/test1234",
+                scaffold_sha="deadbeef",
+                conflicts=[],
+                succeeded=True,
+                developer_commits=[],
+                config=BASELINE_CONFIG,
+            )
+        return patch("servicectl.replay.refresh", side_effect=_make_run)
+
+    def test_no_merge_prints_manual_commands(self):
+        """`--no-merge` (the default in the test helper) skips the
+        merge entirely and prints the manual-commands panel."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = _make_refresh_repo(Path(td))
+            result = _run_refresh_with_input(repo=repo, stdin_input="")
+            assert result.exit_code == 0
+            # The manual-commands panel is in the output
+            assert "git merge --ff-only sac/refresh/test1234" in result.output
+            assert "git worktree remove" in result.output
+            assert "git branch -d sac/refresh/test1234" in result.output
+
+    def test_auto_merge_runs_git_commands_in_order(self):
+        """`--auto-merge` issues git merge, git worktree remove, and
+        git branch -d, in that order, with returncode 0 on each."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = _make_refresh_repo(Path(td))
+            call_log = []
+
+            def fake_subprocess_run(args, **kwargs):
+                # Record the first 3 positional args (the command list)
+                # and the returncode we'll fake.
+                call_log.append({
+                    "args": list(args),
+                    "returncode": 0,
+                    "stderr": b"",
+                    "stdout": b"",
+                })
+                # Return a CompletedProcess-shaped object
+                return subprocess.CompletedProcess(
+                    args=list(args), returncode=0, stdout=b"", stderr=b"",
+                )
+
+            runner = CliRunner()
+            with self._stub_replay_with_branch(), \
+                 patch("subprocess.run", side_effect=fake_subprocess_run):
+                result = runner.invoke(
+                    refresh,
+                    [str(repo), "--auto-merge", "--yes"],
+                    env={"PATH": ""},
+                    input="",
+                    catch_exceptions=False,
+                )
+            assert result.exit_code == 0, f"Output:\n{result.output}"
+
+            # We expect at least 3 subprocess calls: the merge, the
+            # worktree remove, and the branch delete.
+            # (Note: _merge_and_cleanup_worktree calls subprocess.run
+            # 3 times. Tests may also issue subprocess calls through
+            # other paths; we filter to the git ones.)
+            git_calls = [c for c in call_log if c["args"] and c["args"][0] == "git"]
+            assert len(git_calls) >= 3, f"expected >= 3 git calls, got {len(git_calls)}: {git_calls}"
+
+            # 1st: git merge --ff-only sac/refresh/test1234
+            assert git_calls[0]["args"][1:3] == ["-C", str(repo)]
+            assert git_calls[0]["args"][3] == "merge"
+            assert git_calls[0]["args"][4] == "--ff-only"
+            assert git_calls[0]["args"][5] == "sac/refresh/test1234"
+
+            # 2nd: git worktree remove <worktree> --force
+            assert git_calls[1]["args"][3] == "worktree"
+            assert git_calls[1]["args"][4] == "remove"
+            assert git_calls[1]["args"][6] == "--force"
+
+            # 3rd: git branch -d sac/refresh/test1234
+            assert git_calls[2]["args"][3] == "branch"
+            assert git_calls[2]["args"][4] == "-d"
+            assert git_calls[2]["args"][5] == "sac/refresh/test1234"
+
+    def test_auto_merge_merge_failure_preserves_worktree(self):
+        """If the fast-forward merge fails (returncode != 0), the
+        helper reports the error and leaves the worktree alone."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = _make_refresh_repo(Path(td))
+
+            def fake_subprocess_run(args, **kwargs):
+                # First call is the merge; fail it.
+                if args and args[0] == "git" and "merge" in args:
+                    return subprocess.CompletedProcess(
+                        args=list(args),
+                        returncode=1,
+                        stdout=b"",
+                        stderr=b"fatal: not a fast-forward",
+                    )
+                # Subsequent calls (worktree remove, branch delete)
+                # should NOT happen if merge failed.
+                raise AssertionError(
+                    f"unexpected subprocess call after merge failure: {args}"
+                )
+
+            runner = CliRunner()
+            with self._stub_replay_with_branch(), \
+                 patch("subprocess.run", side_effect=fake_subprocess_run):
+                result = runner.invoke(
+                    refresh,
+                    [str(repo), "--auto-merge", "--yes"],
+                    env={"PATH": ""},
+                    input="",
+                    catch_exceptions=False,
+                )
+            assert result.exit_code == 0
+            assert "merge failed" in result.output
+            assert "not a fast-forward" in result.output
+            # No subprocess call beyond the failed merge: the panel
+            # reports the failure and tells the user the worktree is
+            # preserved.
+            assert "worktree is preserved at" in result.output
+            assert "sac/refresh/test1234" in result.output
+
+    def test_default_yes_responds_to_y(self):
+        """Default UX (TTY, no flag): the helper asks y/N. If the
+        user types 'y', the merge runs."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = _make_refresh_repo(Path(td))
+
+            def fake_subprocess_run(args, **kwargs):
+                return subprocess.CompletedProcess(
+                    args=list(args), returncode=0, stdout=b"", stderr=b"",
+                )
+
+            # Patch click.prompt to return BASELINE_CONFIG's current
+            # value for each field. This bypasses click's retry-on-
+            # bad-input behavior so the walkthrough consumes zero
+            # stdin lines; the only consumer is the post-refresh
+            # `input("y/N")` call inside _offer_post_refresh_merge.
+            from unittest.mock import MagicMock
+            answers = iter([
+                BASELINE_CONFIG.template,
+                BASELINE_CONFIG.deploy_target,
+                BASELINE_CONFIG.gcp_region,
+                BASELINE_CONFIG.gcp_project_id,
+                BASELINE_CONFIG.registry,
+                BASELINE_CONFIG.db,
+            ])
+            patched_prompt = MagicMock(side_effect=lambda *a, **kw: next(answers))
+
+            runner = CliRunner()
+            with self._stub_replay_with_branch(), \
+                 patch("subprocess.run", side_effect=fake_subprocess_run), \
+                 patch("servicectl.cli._stdin_is_tty", return_value=True), \
+                 patch("click.prompt", patched_prompt):
+                result = runner.invoke(
+                    refresh,
+                    [str(repo)],  # no flags; full default UX
+                    env={"PATH": ""},
+                    input="y\ny\n",  # pre-refresh confirm + post-refresh merge
+                    catch_exceptions=False,
+                )
+            assert result.exit_code == 0, f"Output:\n{result.output}"
+            # The y/N merge question was asked
+            assert "Would you like me to merge" in result.output
+            # The merge ran ("All done." is printed only on full success)
+            assert "All done." in result.output
+
+    def test_default_n_responds_to_n_prints_manual(self):
+        """Default UX (TTY, no flag): the user types 'n' to the merge
+        prompt, and the manual-commands panel is shown instead of
+        running the merge."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = _make_refresh_repo(Path(td))
+
+            def fake_subprocess_run(args, **kwargs):
+                return subprocess.CompletedProcess(
+                    args=list(args), returncode=0, stdout=b"", stderr=b"",
+                )
+
+            from unittest.mock import MagicMock
+            answers = iter([
+                BASELINE_CONFIG.template,
+                BASELINE_CONFIG.deploy_target,
+                BASELINE_CONFIG.gcp_region,
+                BASELINE_CONFIG.gcp_project_id,
+                BASELINE_CONFIG.registry,
+                BASELINE_CONFIG.db,
+            ])
+            patched_prompt = MagicMock(side_effect=lambda *a, **kw: next(answers))
+
+            runner = CliRunner()
+            with self._stub_replay_with_branch(), \
+                 patch("subprocess.run", side_effect=fake_subprocess_run), \
+                 patch("servicectl.cli._stdin_is_tty", return_value=True), \
+                 patch("click.prompt", patched_prompt):
+                result = runner.invoke(
+                    refresh,
+                    [str(repo)],  # default UX
+                    env={"PATH": ""},
+                    input="y\nn\n",  # y to proceed, n to merge
+                    catch_exceptions=False,
+                )
+            assert result.exit_code == 0, f"Output:\n{result.output}"
+            assert "Would you like me to merge" in result.output
+            # The manual-commands panel is shown
+            assert "git merge --ff-only sac/refresh/test1234" in result.output
+            # The "All done." success line should NOT appear (we
+            # printed manual commands, not ran the merge)
+            assert "All done." not in result.output
