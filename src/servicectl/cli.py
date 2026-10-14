@@ -18,7 +18,6 @@ from pathlib import Path
 import click
 from rich.console import Console
 from rich.panel import Panel
-from rich import box as _rich_box  # ASCII panels render in legacy Windows hosts (PowerShell 5 / pwsh conhost)
 
 from . import __version__
 from . import github_api
@@ -43,6 +42,7 @@ from .sac_config import SacConfig, write_config
 from .templates import list_templates, TEMPLATES as _TEMPLATES
 
 # Force UTF-8 so Rich's Unicode glyphs (✓, →) don't choke on Windows cp1252 consoles.
+import os as _os
 import sys as _sys
 import io as _io
 
@@ -55,8 +55,27 @@ if _sys.platform == "win32":
         _sys.stdout = _io.TextIOWrapper(_sys.stdout.buffer, encoding="utf-8")
         _sys.stderr = _io.TextIOWrapper(_sys.stderr.buffer, encoding="utf-8")
 
-console = Console(force_terminal=None, legacy_windows=False)
-err_console = Console(stderr=True, style="bold red")
+    # Detect VT (virtual terminal) support. Windows Terminal sets WT_SESSION;
+    # legacy conhost does not. When VT is OFF, the conhost prints Rich's
+    # ANSI escape sequences as literal text (you see "[1m" instead of bold),
+    # so we tell Rich to use the Win32 console API instead via legacy_windows.
+    _HAS_VT = bool(
+        _os.environ.get("WT_SESSION")
+        or "xterm" in _os.environ.get("TERM", "").lower()
+        or "256color" in _os.environ.get("TERM", "").lower()
+    )
+else:
+    _HAS_VT = True
+
+# On a legacy conhost (no VT support), `safe_box=True` (the Rich default)
+# silently substitutes `box.ROUNDED` with HEAVY corners because it can't
+# prove the encoding handles the Unicode box-drawing chars. We know our
+# stream is UTF-8 (reconfigured above), so opt out of the substitution
+# and let the round corners through.
+console = Console(legacy_windows=not _HAS_VT, safe_box=False)
+err_console = Console(
+    stderr=True, style="bold red", legacy_windows=not _HAS_VT, safe_box=False,
+)
 
 
 def _write_askpass(token: str) -> str:
@@ -191,7 +210,6 @@ def _prompt_missing_init_values(
                 "Let's scaffold a new service. I'll ask a few questions; you can "
                 "press Enter to accept the default shown in [cyan][brackets][/cyan].",
                 border_style="cyan",
-                box=_rich_box.ASCII,
             )
         )
         while not name:
@@ -1118,7 +1136,6 @@ def init(
             + f"  {deploy_hint}",
             title="service scaffolded",
             border_style="green",
-            box=_rich_box.ASCII,
         )
     )
 
@@ -1184,7 +1201,6 @@ def modify(
                 f"  db:          {mod.current_db or 'unknown'}\n",
                 title=f"settings for {path}",
                 border_style="cyan",
-                box=_rich_box.ASCII,
             )
         )
         return
@@ -1441,7 +1457,6 @@ def refresh(
                 f"[brackets][/cyan]; press Enter to keep, or type a new "
                 f"value to change.",
                 border_style="cyan",
-                box=_rich_box.ASCII,
             )
         )
         new_config = _prompt_refresh_overrides(config=current_config)
@@ -1479,7 +1494,6 @@ def refresh(
                     f"  recover with:  git update-ref refs/heads/<branch> {e.recovery_ref}",
                     title="refresh failed",
                     border_style="red",
-                    box=_rich_box.ASCII,
                 )
             )
             sys.exit(2)
@@ -1510,7 +1524,6 @@ def refresh(
                     f"  recovery ref: [cyan]{e.recovery_ref}[/cyan]",
                     title="resolution failed",
                     border_style="red",
-                    box=_rich_box.ASCII,
                 )
             )
             sys.exit(2)
@@ -1534,7 +1547,6 @@ def refresh(
                     f"  recovery ref: [cyan]{e.recovery_ref}[/cyan]",
                     title="resolution failed",
                     border_style="red",
-                    box=_rich_box.ASCII,
                 )
             )
             sys.exit(2)
@@ -1552,7 +1564,6 @@ def refresh(
                 f"Next: wait for the PR to merge, then re-run refresh.",
                 title="refresh conflict resolved",
                 border_style="green",
-                box=_rich_box.ASCII,
             )
         )
         return
@@ -1585,7 +1596,6 @@ def refresh(
                 f"  servicectl refresh {repo}    # for real",
                 title="refresh plan",
                 border_style="cyan",
-                box=_rich_box.ASCII,
             )
         )
         return
@@ -1603,7 +1613,6 @@ def refresh(
                 f"Proceed? [y/N]",
                 title="refresh confirmation",
                 border_style="yellow",
-                box=_rich_box.ASCII,
             )
         )
         try:
@@ -1625,7 +1634,6 @@ def refresh(
                 f"The worktree is ready to merge or fast-forward into {run.base_branch}.",
                 title="refresh succeeded",
                 border_style="green",
-                box=_rich_box.ASCII,
             )
         )
         # Post-refresh: offer to merge the worktree branch into the
@@ -1695,7 +1703,6 @@ def _merge_and_cleanup_worktree(
                 f"      git worktree remove {worktree_dir}\n"
                 f"      git branch -D {branch_name}",
                 border_style="red",
-                box=_rich_box.ASCII,
             )
         )
         return False
@@ -1718,7 +1725,6 @@ def _merge_and_cleanup_worktree(
                 f"Remove it by hand with:\n"
                 f"  git worktree remove {worktree_dir} --force",
                 border_style="yellow",
-                box=_rich_box.ASCII,
             )
         )
         return False
@@ -1772,7 +1778,6 @@ def _print_manual_merge_commands(
             f"you need to roll back: refs/sac/pre-refresh-<run_id>.",
             title=f"merge {branch_name} into {base_branch}",
             border_style="cyan",
-            box=_rich_box.ASCII,
         )
     )
 
