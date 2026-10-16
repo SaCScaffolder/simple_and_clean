@@ -487,13 +487,13 @@ $ servicectl refresh
   shows the current value in [brackets]; press Enter to keep, or type a
   new value to change.
 
-  Template — which service framework?
+  Template — which service framework?:
     go-webapi          Go 1.22+ + net/http + PostgreSQL (distroless runtime) (current)
     python-flask       Python + Flask + PostgreSQL
     ...
   Template id [go-webapi]:
 
-  Deployment target
+  Deployment target:
     local                  local — no remote cloud; just Dockerfile + docker-compose
     gcp-cloud-run          gcp-cloud-run — Google Cloud Run (serverless) (current)
     ...
@@ -501,7 +501,7 @@ $ servicectl refresh
   GCP region [us-central1]:
   GCP project ID (required for --deploy=gcp-cloud-run) [my-gcp-proj]:
 
-  Container registry
+  Container registry:
     dockerhub
     ghcr         (default; works with GitHub Actions) (current)
     gcr          (legacy; prefer gar)
@@ -509,12 +509,13 @@ $ servicectl refresh
   Registry [ghcr]: gar
     GAR image path: us-central1-docker.pkg.dev/my-gcp-proj/your-service/your-service:${SHA}
 
-  Database [postgres]:
+  Database: postgres
 
   Changes:
     registry: ghcr → gar
 
-  .servicectl.json updated; refresh will use the new values.
+  refresh will use the new values; the source repo's .servicectl.json
+  is left untouched until the worktree branch is merged.
 ```
 
 The GAR image path is printed as soon as you pick `gar` for the
@@ -556,7 +557,7 @@ interactively.
 
 | Invocation | Behavior |
 |---|---|
-| `servicectl refresh` (TTY) | Walk through interactively, write back on change. |
+| `servicectl refresh` (TTY) | Walk through interactively; new values flow into the worktree's scaffold in-memory and only land on `main` when the merge / fast-forward succeeds. |
 | `servicectl refresh` (piped stdin) | Skip the prompt; use on-disk config as-is. |
 | `servicectl refresh --no-input` | Explicit "don't prompt", same as piped stdin. |
 | `SERVICECTL_NO_INPUT=1 servicectl refresh` | CI backdoor; same as `--no-input`. |

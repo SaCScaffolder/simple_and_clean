@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 
 import click
+import questionary
+from questionary import Choice
 from rich.console import Console
 from rich.panel import Panel
 
@@ -76,6 +78,58 @@ console = Console(legacy_windows=not _HAS_VT, safe_box=False)
 err_console = Console(
     stderr=True, style="bold red", legacy_windows=not _HAS_VT, safe_box=False,
 )
+
+
+def _safe_ask(questionary_fn, *args, **kwargs):
+    """Run a questionary prompt with our abort handling.
+
+    questionary's `.ask()` returns ``None`` on Ctrl-C / EOF / abort.
+    We translate that into the same "aborted." + ``sys.exit(1)``
+    pattern the rest of the CLI uses, so callers don't have to
+    special-case ``None``.
+
+    For ``questionary.select`` the result is the chosen ``Choice``
+    value (or the raw string if you passed plain strings). For
+    ``questionary.text`` it's the typed string. For
+    ``questionary.confirm`` it's ``True`` / ``False``. The caller
+    picks the right questionary function for the prompt shape and
+    gets the right return type out.
+
+    We pass ``kbi_msg=""`` to ``.ask()`` to suppress questionary's
+    default ``"\nCancelled by user\n"`` message. Without this the
+    user would see two abort messages on Ctrl-C (questionary's and
+    ours); with it, the single ``aborted.`` line is the canonical
+    one across the whole CLI.
+
+    We also catch ``ValueError`` at prompt-construct time and
+    translate it into the same "aborted." exit pattern. This is
+    defensive: ``questionary.select(choices=..., default=...)``
+    raises ``ValueError("Invalid `default` value passed. The value
+    (`X`) does not exist in the set of choices.")`` if the config
+    file's value is not in the current choice list (e.g. a manually
+    edited ``.servicectl.json`` with a stale ``deploy_target`` like
+    ``"kubernetes"`` that's been removed from the choices). Without
+    this catch, the user would see a stack trace; with it, they
+    see ``aborted.`` and a clean exit, which is at least no worse
+    than the pre-questionary ``click.prompt`` behavior (which
+    surfaced ``click.UsageError`` in a similarly unhelpful way).
+    """
+    try:
+        result = questionary_fn(*args, **kwargs).ask(kbi_msg="")
+    except (KeyboardInterrupt, EOFError):
+        result = None
+    except ValueError as e:
+        # An invalid `default` for questionary.select -- treat as
+        # the user aborting, since the only way to recover is to
+        # edit `.servicectl.json` and re-run. The error message
+        # itself is printed for diagnostic value; if the user can
+        # figure out what's wrong from the trace they can fix it.
+        err_console.print(f"\n[red]error:[/red] {e}")
+        result = None
+    if result is None:
+        err_console.print("[yellow]aborted.[/yellow]")
+        sys.exit(1)
+    return result
 
 
 def _write_askpass(token: str) -> str:
@@ -187,121 +241,128 @@ def _prompt_missing_init_values(
     """
     from .templates import TEMPLATES as _TEMPLATES  # local import; click decorator runs at import time
 
-    def _safe_prompt(*args, **kwargs):
-        """Click prompt that maps EOF / KeyboardInterrupt to a clean exit."""
-        try:
-            return click.prompt(*args, **kwargs)
-        except (click.Abort, EOFError, KeyboardInterrupt):
-            err_console.print("\n[yellow]aborted.[/yellow]")
-            sys.exit(1)
-
-    def _safe_confirm(*args, **kwargs):
-        try:
-            return click.confirm(*args, **kwargs)
-        except (click.Abort, EOFError, KeyboardInterrupt):
-            err_console.print("\n[yellow]aborted.[/yellow]")
-            sys.exit(1)
-
     # 1. NAME (always prompt if missing — required, no good default)
     if not name:
         console.print(
             Panel(
                 "[bold]Welcome to servicectl![/bold]\n\n"
-                "Let's scaffold a new service. I'll ask a few questions; you can "
-                "press Enter to accept the default shown in [cyan][brackets][/cyan].",
+                "Let's scaffold a new service. I'll ask a few questions; "
+                "for the multiple-choice ones, use ↑/↓ to pick and Enter "
+                "to confirm. For the typed ones, the default is shown in "
+                "[cyan][brackets][/cyan] — press Enter to accept.",
                 border_style="cyan",
             )
         )
         while not name:
-            name = _safe_prompt("Service name", type=str).strip()
+            name = _safe_ask(
+                questionary.text, "Service name: ",
+            ).strip()
             if not name:
                 console.print("[yellow]name cannot be empty[/yellow]")
 
     # 2. TEMPLATE (always prompt if missing — required, choice)
-        console.print("\n[bold]Template[/bold] — which service framework?")
-        for tid, desc in _TEMPLATES.items():
-            console.print(f"  [cyan]{tid:<18}[/cyan] {desc}")
-        while not template:
-            value = _safe_prompt("Template id", type=click.Choice(list(_TEMPLATES.keys()), case_sensitive=False), show_choices=False).strip()
-            if value:
-                template = value
+    if not template:
+        template_choices = [
+            Choice(tid, description=desc) for tid, desc in _TEMPLATES.items()
+        ]
+        template = _safe_ask(
+            questionary.select,
+            "Template — which service framework?",
+            choices=template_choices,
+        )
 
     # 3. DEPLOY TARGET (default local — prompt to confirm/change)
-    # Click Choice shows the default in the prompt; if user just hits
-    # Enter, it accepts the default. So we always prompt here.
-    console.print("\n[bold]Deployment target[/bold]")
+    # questionary.select with a `default` that matches a Choice value
+    # pre-selects that choice. The user can still change it with arrows.
     deploy_labels = {
-        "local": "local — no remote cloud; just Dockerfile + docker-compose",
-        "azure": "azure — Azure App Service (Linux) + Container Registry",
-        "gcp-cloud-run": "gcp-cloud-run — Google Cloud Run (serverless)",
-        "gcp-gke-autopilot": "gcp-gke-autopilot — GKE Autopilot (managed k8s)",
+        "local": "no remote cloud; just Dockerfile + docker-compose",
+        "azure": "Azure App Service (Linux) + Container Registry",
+        "gcp-cloud-run": "Google Cloud Run (serverless)",
+        "gcp-gke-autopilot": "GKE Autopilot (managed k8s)",
     }
-    for d in _DEPLOY_TARGET_CHOICES:
-        console.print(f"  [cyan]{d:<22}[/cyan] {deploy_labels.get(d, '')}")
-    deploy_target = _safe_prompt(
-        "Deploy target",
-        type=click.Choice(_DEPLOY_TARGET_CHOICES, case_sensitive=False),
+    deploy_target_choices = [
+        Choice(d, description=deploy_labels.get(d, ""))
+        for d in _DEPLOY_TARGET_CHOICES
+    ]
+    deploy_target = _safe_ask(
+        questionary.select,
+        "Deployment target: ",
+        choices=deploy_target_choices,
         default=deploy_target,
-        show_choices=False,
     )
 
     # 4. AZURE / GCP-REGION / GCP-PROJECT-ID (only if relevant deploy)
     if deploy_target == "azure":
-        azure_region = _safe_prompt("Azure region", default=azure_region)
+        azure_region = _safe_ask(
+            questionary.text, "Azure region: ", default=azure_region,
+        ).strip() or azure_region
     elif deploy_target.startswith("gcp-"):
-        gcp_region = _safe_prompt("GCP region", default=gcp_region)
-        while not gcp_project_id:
-            value = _safe_prompt(
-                f"GCP project ID (required for --deploy={deploy_target})",
-                type=str,
-            ).strip()
-            if value:
-                gcp_project_id = value
-            else:
-                console.print("[yellow]GCP project ID cannot be empty for gcp- deploys[/yellow]")
+        gcp_region = _safe_ask(
+            questionary.text, "GCP region: ", default=gcp_region,
+        ).strip() or gcp_region
+        # For gcp_project_id, allow Enter to keep the current value
+        # but warn if it's empty (migrations from non-GCP deploys won't
+        # have one set).
+        prompt_default = gcp_project_id or ""
+        value = _safe_ask(
+            questionary.text,
+            f"GCP project ID (required for --deploy={deploy_target}): ",
+            default=prompt_default,
+        ).strip()
+        if not value:
+            console.print(
+                f"[yellow]warning:[/yellow] GCP project ID is empty; the next "
+                f"CI run with --deploy={deploy_target} will fail until you "
+                f"set it in .servicectl.json (or re-run init)."
+            )
+        gcp_project_id = value or None
 
     # 5. REGISTRY (default ghcr — prompt to confirm/change)
-    console.print("\n[bold]Container registry[/bold]")
-    for r in _REGISTRY_CHOICES:
-        note = ""
-        if r == "gar":
-            note = " (recommended for GCP deploys)"
-        elif r == "gcr":
-            note = " (legacy; prefer gar)"
-        elif r == "ghcr":
-            note = " (default; works with GitHub Actions)"
-        console.print(f"  [cyan]{r:<12}[/cyan]{note}")
-    registry = _safe_prompt(
-        "Registry",
-        type=click.Choice(_REGISTRY_CHOICES, case_sensitive=False),
+    registry_notes = {
+        "gar": " (recommended for GCP deploys)",
+        "gcr": " (legacy; prefer gar)",
+        "ghcr": " (default; works with GitHub Actions)",
+    }
+    registry_choices = [
+        Choice(r, description=registry_notes.get(r, "").strip())
+        for r in _REGISTRY_CHOICES
+    ]
+    registry = _safe_ask(
+        questionary.select,
+        "Container registry: ",
+        choices=registry_choices,
         default=registry,
-        show_choices=False,
     )
 
     # 6. DATABASE (default postgres — prompt to confirm/change)
-    db = _safe_prompt(
-        "Database",
-        type=click.Choice(_DB_CHOICES, case_sensitive=False),
+    db = _safe_ask(
+        questionary.select,
+        "Database: ",
+        choices=[Choice(d) for d in _DB_CHOICES],
         default=db,
-        show_choices=False,
     )
 
     # 7. GITHUB REPO CREATION (yes/no prompt; if yes, ask for owner/name)
     # The user can skip this (it defaults to no), or if they already
     # passed --repo on the command line we don't re-ask.
     if repo is None:
-        wants_repo = _safe_confirm("Create a GitHub repo for this service now?", default=False)
+        wants_repo = _safe_ask(
+            questionary.confirm,
+            "Create a GitHub repo for this service now?",
+            default=False,
+        )
         if wants_repo:
             while not repo:
-                value = _safe_prompt(
-                    "Repo (format: OWNER/NAME)",
-                    type=str,
+                value = _safe_ask(
+                    questionary.text, "Repo (format: OWNER/NAME): ",
                 ).strip()
                 if "/" in value and not value.startswith("/") and not value.endswith("/"):
                     repo = value
                 else:
                     console.print("[yellow]must be in OWNER/NAME format (e.g. SaCScaffolder/my-service)[/yellow]")
-            repo_private = _safe_confirm("Make this repo private?", default=False)
+            repo_private = _safe_ask(
+                questionary.confirm, "Make this repo private?", default=False,
+            )
         # else repo stays None and we proceed without GitHub repo creation
 
     return (name, template, deploy_target, azure_region, gcp_region, gcp_project_id, registry, db, repo, repo_private)
@@ -333,9 +394,13 @@ def _prompt_refresh_overrides(
         deployment, and refreshing shouldn't silently toggle them.
 
     Returns a ``SacConfig`` with the (possibly) updated fields. The
-    caller is responsible for writing the new config back to disk via
-    ``write_config(repo, new_config)`` if anything changed, and for
-    informing the user what changed.
+    caller is responsible for telling the user what changed. The
+    caller does NOT write the new config back to disk; ``refresh``
+    threads the result into ``replay_refresh()`` via the new
+    ``config_override`` parameter, so the source repo's working
+    tree stays pristine until the user accepts the post-refresh
+    merge prompt and the worktree branch is fast-forwarded into
+    the source branch.
 
     GCP exposure note: when the user picks a ``gcp-*`` deploy target
     we re-prompt for ``gcp_region`` and ``gcp_project_id`` (with the
@@ -347,48 +412,35 @@ def _prompt_refresh_overrides(
     """
     from .templates import TEMPLATES as _TEMPLATES  # local import; see _prompt_missing_init_values
 
-    def _safe_prompt(*args, **kwargs):
-        try:
-            return click.prompt(*args, **kwargs)
-        except (click.Abort, EOFError, KeyboardInterrupt):
-            err_console.print("\n[yellow]aborted.[/yellow]")
-            sys.exit(1)
-
-    def _safe_confirm(*args, **kwargs):
-        try:
-            return click.confirm(*args, **kwargs)
-        except (click.Abort, EOFError, KeyboardInterrupt):
-            err_console.print("\n[yellow]aborted.[/yellow]")
-            sys.exit(1)
-
     # 1. TEMPLATE (default = current value; choice of TEMPLATES)
-    console.print("\n[bold]Template[/bold] — which service framework?")
-    for tid, desc in _TEMPLATES.items():
-        marker = " [cyan](current)[/cyan]" if tid == config.template else ""
-        console.print(f"  [cyan]{tid:<18}[/cyan] {desc}{marker}")
-    template = _safe_prompt(
-        "Template id",
-        type=click.Choice(list(_TEMPLATES.keys()), case_sensitive=False),
+    # questionary.select shows the current value pre-highlighted via
+    # the `default` kwarg (matched against Choice values).
+    template_choices = [
+        Choice(tid, description=desc) for tid, desc in _TEMPLATES.items()
+    ]
+    template = _safe_ask(
+        questionary.select,
+        "Template — which service framework?",
+        choices=template_choices,
         default=config.template,
-        show_choices=False,
     )
 
     # 2. DEPLOY TARGET (default = current value)
-    console.print("\n[bold]Deployment target[/bold]")
     deploy_labels = {
-        "local": "local — no remote cloud; just Dockerfile + docker-compose",
-        "azure": "azure — Azure App Service (Linux) + Container Registry",
-        "gcp-cloud-run": "gcp-cloud-run — Google Cloud Run (serverless)",
-        "gcp-gke-autopilot": "gcp-gke-autopilot — GKE Autopilot (managed k8s)",
+        "local": "no remote cloud; just Dockerfile + docker-compose",
+        "azure": "Azure App Service (Linux) + Container Registry",
+        "gcp-cloud-run": "Google Cloud Run (serverless)",
+        "gcp-gke-autopilot": "GKE Autopilot (managed k8s)",
     }
-    for d in _DEPLOY_TARGET_CHOICES:
-        marker = " [cyan](current)[/cyan]" if d == config.deploy_target else ""
-        console.print(f"  [cyan]{d:<22}[/cyan] {deploy_labels.get(d, '')}{marker}")
-    deploy_target = _safe_prompt(
-        "Deploy target",
-        type=click.Choice(_DEPLOY_TARGET_CHOICES, case_sensitive=False),
+    deploy_target_choices = [
+        Choice(d, description=deploy_labels.get(d, ""))
+        for d in _DEPLOY_TARGET_CHOICES
+    ]
+    deploy_target = _safe_ask(
+        questionary.select,
+        "Deployment target: ",
+        choices=deploy_target_choices,
         default=config.deploy_target,
-        show_choices=False,
     )
 
     # 3. REGION / PROJECT — only prompt for the ones the new target uses.
@@ -400,16 +452,22 @@ def _prompt_refresh_overrides(
     gcp_region = config.gcp_region
     gcp_project_id = config.gcp_project_id
     if deploy_target == "azure":
-        azure_region = _safe_prompt("Azure region", default=azure_region)
+        value = _safe_ask(
+            questionary.text, "Azure region: ", default=azure_region,
+        ).strip()
+        azure_region = value or azure_region
     elif deploy_target.startswith("gcp-"):
-        gcp_region = _safe_prompt("GCP region", default=gcp_region)
+        value = _safe_ask(
+            questionary.text, "GCP region: ", default=gcp_region,
+        ).strip()
+        gcp_region = value or gcp_region
         # For gcp_project_id, allow Enter to keep the current value
         # but warn if it's empty (migrations from non-GCP deploys won't
         # have one set).
         prompt_default = gcp_project_id or ""
-        value = _safe_prompt(
-            f"GCP project ID (required for --deploy={deploy_target})",
-            type=str,
+        value = _safe_ask(
+            questionary.text,
+            f"GCP project ID (required for --deploy={deploy_target}): ",
             default=prompt_default,
         ).strip()
         if not value:
@@ -422,22 +480,20 @@ def _prompt_refresh_overrides(
         gcp_project_id = value or None
 
     # 4. REGISTRY (default = current value; print GAR image path if gar)
-    console.print("\n[bold]Container registry[/bold]")
-    for r in _REGISTRY_CHOICES:
-        note = ""
-        if r == "gar":
-            note = " (recommended for GCP deploys)"
-        elif r == "gcr":
-            note = " (legacy; prefer gar)"
-        elif r == "ghcr":
-            note = " (default; works with GitHub Actions)"
-        marker = " [cyan](current)[/cyan]" if r == config.registry else ""
-        console.print(f"  [cyan]{r:<12}[/cyan]{note}{marker}")
-    registry = _safe_prompt(
-        "Registry",
-        type=click.Choice(_REGISTRY_CHOICES, case_sensitive=False),
+    registry_notes = {
+        "gar": "recommended for GCP deploys",
+        "gcr": "legacy; prefer gar",
+        "ghcr": "default; works with GitHub Actions",
+    }
+    registry_choices = [
+        Choice(r, description=registry_notes.get(r, ""))
+        for r in _REGISTRY_CHOICES
+    ]
+    registry = _safe_ask(
+        questionary.select,
+        "Container registry: ",
+        choices=registry_choices,
         default=config.registry,
-        show_choices=False,
     )
 
     # 4a. GCP exposure: if the user picked gar, show the resolved
@@ -457,11 +513,11 @@ def _prompt_refresh_overrides(
         )
 
     # 5. DATABASE (default = current value)
-    db = _safe_prompt(
-        "Database",
-        type=click.Choice(_DB_CHOICES, case_sensitive=False),
+    db = _safe_ask(
+        questionary.select,
+        "Database: ",
+        choices=[Choice(d) for d in _DB_CHOICES],
         default=config.db,
-        show_choices=False,
     )
 
     # Build a new SacConfig preserving the non-prompted fields. We
@@ -1256,12 +1312,12 @@ def modify(
         return
 
     if not yes:
-        console.print(f"\nApply these changes to {path}? [y/N]")
-        try:
-            response = input().strip().lower()
-        except EOFError:
-            response = "n"
-        if response != "y":
+        proceed = _safe_ask(
+            questionary.confirm,
+            f"Apply these changes to {path}?",
+            default=False,
+        )
+        if not proceed:
             console.print("[yellow]Aborted; no files written.[/yellow]")
             return
 
@@ -1429,7 +1485,6 @@ def refresh(
     # replay_refresh() raise RefreshConfigMissing; the user gets the
     # same error as before the prompt existed.
     from .sac_config import read_config as _read_cfg
-    from .sac_config import write_config as _write_cfg
     current_config: SacConfig | None = None
     cfg_path = repo / ".servicectl.json"
     if cfg_path.exists():
@@ -1443,6 +1498,13 @@ def refresh(
         # "missing config".)
         current_config = _read_cfg(repo)
 
+    # Declared outside the prompt guard so they're always defined
+    # for the `replay_refresh()` call below, even when the prompt
+    # path is skipped (--no-input, non-TTY, env-var override, or
+    # missing `.servicectl.json` -- in which case the user never
+    # got to change anything and `changes` is empty).
+    new_config: SacConfig | None = None
+    changes: list[str] = []
     if (
         current_config is not None
         and not no_input
@@ -1462,20 +1524,48 @@ def refresh(
         new_config = _prompt_refresh_overrides(config=current_config)
         changes = _summarize_refresh_changes(current_config, new_config)
         if changes:
-            _write_cfg(repo, new_config)
             console.print("\n[bold]Changes:[/bold]")
             for line in changes:
                 console.print(line)
             console.print(
-                f"\n[dim].servicectl.json updated; refresh will use the new values.[/dim]"
+                f"\n[dim]refresh will use the new values; the source repo's "
+                f".servicectl.json is left untouched until the worktree "
+                f"branch is merged.[/dim]"
             )
         else:
             console.print("\n[dim]No changes; refresh will use the on-disk config.[/dim]")
 
     # Lazy import to keep `servicectl --help` fast and to avoid a circular
     # import risk (replay -> generator -> sac_trailers at module-load time).
+    #
+    # `config_override` plumbing: when the prompt was interactive AND
+    # the user actually changed something, thread the in-memory
+    # `new_config` into `replay_refresh()` rather than writing it to
+    # disk first. The CLI used to do `_write_cfg(repo, new_config)`
+    # here so that `replay_refresh()` could re-read it from disk, but
+    # that left the source repo's working tree dirty with a
+    # prompt-confirmed `.servicectl.json` -- which has two annoying
+    # consequences:
+    #   1. The follow-up `git merge --ff-only sac/refresh/<id>` from
+    #      inside the source repo refuses with "Your local changes to
+    #      the following files would be overwritten by merge:
+    #      .servicectl.json" because the on-disk dirty index conflicts
+    #      with the merge target's working tree, even when the content
+    #      matches the worktree's `.servicectl.json` byte-for-byte.
+    #   2. Even after a successful fast-forward, the dirty state
+    #      persists in `git status` until the user commits or stashes
+    #      -- fast-forward updates `HEAD`/the index but doesn't touch
+    #      the working tree's "modified" flag for an already-dirty file.
+    # Threading the config in memory (via replay.refresh()'s new
+    # `config_override` parameter) keeps the source repo pristine
+    # across the refresh regardless of whether the user accepts or
+    # declines the post-refresh merge prompt.
     try:
-        run = replay_refresh(repo, dry_run=dry_run)
+        run = replay_refresh(
+            repo,
+            dry_run=dry_run,
+            config_override=new_config if changes else None,
+        )
     except RefreshNotScaffoldedError as e:
         err_console.print(f"[bold red]error:[/bold red] {e}")
         sys.exit(2)
@@ -1609,17 +1699,13 @@ def refresh(
                 f"  recovery ref:   {run.recovery_ref}\n"
                 f"  developer commits: {len(run.developer_commits)}\n\n"
                 f"The worktree branch will be fast-forwarded into {run.base_branch} on success.\n"
-                f"On conflict, {run.recovery_ref} lets you roll back.\n\n"
-                f"Proceed? [y/N]",
+                f"On conflict, {run.recovery_ref} lets you roll back.",
                 title="refresh confirmation",
                 border_style="yellow",
             )
         )
-        try:
-            response = input().strip().lower()
-        except EOFError:
-            response = "n"
-        if response != "y":
+        proceed = _safe_ask(questionary.confirm, "Proceed?", default=False)
+        if not proceed:
             console.print("[yellow]Aborted; no changes made.[/yellow]")
             return
 
@@ -1828,14 +1914,15 @@ def _offer_post_refresh_merge(
         return
 
     console.print(
-        f"\n[bold]Would you like me to merge {run.branch_name} into "
-        f"{run.base_branch} and clean up the worktree?[/bold] [y/N]"
+        f"\n[bold]Refresh succeeded.[/bold] {run.branch_name} is ready "
+        f"to fast-forward into {run.base_branch}."
     )
-    try:
-        response = input().strip().lower()
-    except EOFError:
-        response = "n"
-    if response == "y":
+    merge = _safe_ask(
+        questionary.confirm,
+        f"Merge {run.branch_name} into {run.base_branch} and clean up the worktree?",
+        default=False,
+    )
+    if merge:
         _merge_and_cleanup_worktree(
             run.source_repo, run.base_branch, run.branch_name, run.worktree_dir
         )

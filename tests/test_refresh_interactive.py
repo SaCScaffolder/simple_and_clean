@@ -18,9 +18,19 @@ This file pins that contract:
      pass `--no-input` (e.g. wrappers).
   4. The prompt walks through template / deploy / region / project /
      registry / db with the current value as the default for each.
-  5. If anything changed, `.servicectl.json` is written back to disk
-     before `replay_refresh()` runs.
-  6. If nothing changed, the prompt exits cleanly and no write happens.
+  5. If anything changed, the new config flows into
+     `replay_refresh()` via the new `config_override` parameter --
+     NOT by writing back to `.servicectl.json` on disk. The source
+     repo's working tree stays pristine so the follow-up
+     `git merge --ff-only sac/refresh/<id>` of the worktree branch
+     doesn't fail with "Your local changes to the following files
+     would be overwritten by merge" against an uncommitted dirty
+     index entry. The new values only land on `main` when the user
+     accepts the post-refresh merge prompt and the worktree branch
+     is fast-forwarded into the source branch.
+  6. If nothing changed, the prompt exits cleanly and no
+     `config_override` is passed (replay reads the on-disk config
+     as before).
   7. Picking `gcp-*` deploy target re-prompts for region + project ID;
      picking `azure` re-prompts for region; picking `local` skips both.
   8. Picking `gar` registry prints the resolved GAR image path so the
@@ -100,7 +110,19 @@ def _stub_replay(*, succeeded: bool = True, scaffold_sha: str = "deadbeef"):
     failure paths in `test_refresh.py`. These tests focus on the
     prompt logic, not the replay outcome.
     """
-    def _make_run(repo: Path, dry_run: bool = False) -> RefreshRun:
+    def _make_run(
+        repo: Path,
+        dry_run: bool = False,
+        config_override: SacConfig | None = None,
+    ) -> RefreshRun:
+        # The CLI passes `config_override` whenever the prompt path
+        # produced a new config. We don't use it here -- the stub
+        # just returns a fixed RefreshRun -- but the signature has
+        # to accept it, otherwise the call from cli.refresh raises
+        # TypeError. See the `config_override` docstring in
+        # replay.refresh for why the CLI threads the override
+        # instead of writing to disk.
+        _ = config_override
         return RefreshRun(
             run_id="test1234",
             source_repo=repo,
@@ -121,19 +143,33 @@ def _stub_replay(*, succeeded: bool = True, scaffold_sha: str = "deadbeef"):
 def _run_refresh_with_input(
     *,
     repo: Path,
-    stdin_input: str,
+    questionary_answers: dict | None = None,
+    answer_callable=None,
     args: list[str] | None = None,
     env: dict | None = None,
     no_input: bool = False,
     yes: bool = True,  # skip the final y/n prompt by default; tests for that flow can set False
     no_merge: bool = True,  # skip the post-refresh merge prompt by default; tests for that flow can set False
 ):
-    """Invoke `servicectl refresh` against `repo` simulating stdin.
+    """Invoke `servicectl refresh` against `repo` with a questionary mock.
 
-    `stdin_input` is the literal text the user would type; newlines
-    separate answers. The TTY check is patched to True when we want
-    the prompt path; left alone (False in CliRunner) when testing
-    non-interactive.
+    Two ways to drive the prompts:
+
+    1. `questionary_answers` is a dict with three optional keys, each
+       a list of predetermined return values:
+         - "text":    answers for `questionary.text` calls (free-text)
+         - "select":  answers for `questionary.select` calls (multiple-choice)
+         - "confirm": answers for `questionary.confirm` calls (y/N)
+       Each questionary call pops the next value from the matching list.
+
+    2. `answer_callable` is a function `(qfn, *args, **kwargs) -> value`
+       called for every questionary invocation. Use this when the
+       answer depends on the questionary function name or kwargs (e.g.
+       "return whatever default the questionary call was given").
+
+    Pass only one of the two. The TTY check is patched to True when
+    we want the prompt path; left alone (False in CliRunner) when
+    testing non-interactive.
     """
     runner = CliRunner()
     full_env = {"PATH": ""}
@@ -147,10 +183,31 @@ def _run_refresh_with_input(
     if no_merge:
         final_args.append("--no-auto-merge")
 
+    if answer_callable is not None:
+        ask_side_effect = answer_callable
+    else:
+        answers = questionary_answers or {}
+        text_iter = iter(answers.get("text", []))
+        select_iter = iter(answers.get("select", []))
+        confirm_iter = iter(answers.get("confirm", []))
+
+        def ask_side_effect(questionary_fn, *fn_args, **fn_kwargs):
+            name = getattr(questionary_fn, "__name__", "")
+            if name == "select":
+                return next(select_iter)
+            if name == "text":
+                return next(text_iter)
+            if name == "confirm":
+                return next(confirm_iter)
+            raise AssertionError(
+                f"_run_refresh_with_input: unexpected questionary function {name!r}"
+            )
+
     with _stub_replay(), \
-         patch("subprocess.run") as mock_subprocess:
+         patch("subprocess.run") as mock_subprocess, \
+         patch("servicectl.cli._safe_ask", side_effect=ask_side_effect):
         mock_subprocess.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
-        result = runner.invoke(refresh, final_args, env=full_env, input=stdin_input, catch_exceptions=False)
+        result = runner.invoke(refresh, final_args, env=full_env, catch_exceptions=False)
     return result
 
 
@@ -169,18 +226,23 @@ class TestHelperBasics:
     def test_returns_same_config_when_user_accepts_all_defaults(self):
         """Pressing Enter through every prompt returns a config equal
         to the input (dataclass equality, not just field-by-field)."""
-        input_str = "\n\n\n\n\n\n"  # template, deploy, region, project, registry, db
+        def _accept_all_defaults(questionary_fn, *fn_args, **fn_kwargs):
+            # Each questionary call gets a different `default` kwarg;
+            # for selects the default is the current value (Choice
+            # value match), for texts it's the current string. Return
+            # the default verbatim to simulate "press Enter".
+            return fn_kwargs.get("default", "")
         with patch("servicectl.cli._stdin_is_tty", return_value=True), \
-             patch("click.prompt", side_effect=lambda *a, **kw: kw.get("default", "")) as mock_prompt:
+             patch("servicectl.cli._safe_ask", side_effect=_accept_all_defaults) as mock_ask:
             new_config = _prompt_refresh_overrides(config=BASELINE_CONFIG)
         # Each interesting field was prompted (template, deploy_target, region/project, registry, db)
-        assert mock_prompt.call_count >= 5
+        assert mock_ask.call_count >= 5
         assert new_config == BASELINE_CONFIG
 
     def test_returns_new_config_when_user_changes_registry(self):
-        """Type `gar` at the registry prompt and the helper returns a
-        config with registry=gar but every other field equal to the
-        input (preserve-as-default contract)."""
+        """Selecting `gar` at the registry prompt returns a config
+        with registry=gar but every other field equal to the input
+        (preserve-as-default contract)."""
         answers = iter([
             BASELINE_CONFIG.template,         # template: accept default
             BASELINE_CONFIG.deploy_target,    # deploy: accept default
@@ -189,8 +251,15 @@ class TestHelperBasics:
             "gar",                            # registry: change!
             BASELINE_CONFIG.db,               # db: accept default
         ])
+        def _side_effect(questionary_fn, *fn_args, **fn_kwargs):
+            name = getattr(questionary_fn, "__name__", "")
+            if name == "select":
+                return next(answers)
+            if name == "text":
+                return next(answers)
+            raise AssertionError(f"unexpected questionary fn {name!r}")
         with patch("servicectl.cli._stdin_is_tty", return_value=True), \
-             patch("click.prompt", side_effect=lambda *a, **kw: next(answers)):
+             patch("servicectl.cli._safe_ask", side_effect=_side_effect):
             new_config = _prompt_refresh_overrides(config=BASELINE_CONFIG)
         assert new_config.registry == "gar"
         assert new_config.template == BASELINE_CONFIG.template
@@ -215,9 +284,10 @@ class TestHelperBasics:
             sac_version="0.2.0",
             sac_base_commit="abc123",
         )
-        input_str = "\n\n\n\n\n\n"
+        def _accept_all_defaults(questionary_fn, *fn_args, **fn_kwargs):
+            return fn_kwargs.get("default", "")
         with patch("servicectl.cli._stdin_is_tty", return_value=True), \
-             patch("click.prompt", side_effect=lambda *a, **kw: kw.get("default", "")):
+             patch("servicectl.cli._safe_ask", side_effect=_accept_all_defaults):
             new_config = _prompt_refresh_overrides(config=baseline)
         assert new_config.ci_provider == "azure-devops"
         assert new_config.coverage_threshold == 85
@@ -271,7 +341,7 @@ class TestNoInputFlag:
         on disk. No prompts, no write-back, no diff."""
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
-            result = _run_refresh_with_input(repo=repo, stdin_input="", no_input=True)
+            result = _run_refresh_with_input(repo=repo, no_input=True)
             assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
             # Read on-disk config BEFORE the tempdir is cleaned up.
             on_disk = read_config(repo)
@@ -307,7 +377,7 @@ class TestNonTTYBehavior:
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
             # Note: no --no-input flag, but CliRunner's stdin is non-TTY
-            result = _run_refresh_with_input(repo=repo, stdin_input="")
+            result = _run_refresh_with_input(repo=repo)
             assert result.exit_code == 0
             on_disk = read_config(repo)
         assert on_disk.registry == "ghcr"  # unchanged
@@ -318,7 +388,7 @@ class TestNonTTYBehavior:
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
             with patch.dict("os.environ", {"SERVICECTL_NO_INPUT": "1"}):
-                result = _run_refresh_with_input(repo=repo, stdin_input="")
+                result = _run_refresh_with_input(repo=repo)
             assert result.exit_code == 0
             on_disk = read_config(repo)
         assert on_disk.registry == "ghcr"  # unchanged
@@ -332,13 +402,16 @@ class TestPromptFlow:
         write to .servicectl.json."""
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
-            # TTY patch + 6 Enter presses (template, deploy, region,
-            # project, registry, db -- all 6 are prompted for the
-            # baseline GCP config; azure_region is NOT prompted because
-            # deploy_target is gcp-cloud-run).
-            input_str = "\n\n\n\n\n\n"
+            # TTY patch + 6 default-accepting answers (template,
+            # deploy, region, project, registry, db -- all 6 are
+            # prompted for the baseline GCP config; azure_region is
+            # NOT prompted because deploy_target is gcp-cloud-run).
+            def _accept_defaults(qfn, *args, **kwargs):
+                return kwargs.get("default", "")
             with patch("servicectl.cli._stdin_is_tty", return_value=True):
-                result = _run_refresh_with_input(repo=repo, stdin_input=input_str, yes=True)
+                result = _run_refresh_with_input(
+                    repo=repo, yes=True, answer_callable=_accept_defaults,
+                )
             assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
             on_disk = read_config(repo)
             assert on_disk == BASELINE_CONFIG
@@ -346,31 +419,54 @@ class TestPromptFlow:
     def test_change_registry_writes_new_value(self):
         """The canonical use case: user accepts everything except
         registry, which they change from `ghcr` to `gar`. The new
-        value should be written to .servicectl.json before
-        replay_refresh() runs."""
+        value should flow into replay.refresh() via the
+        `config_override` parameter -- but the source repo's
+        `.servicectl.json` must remain unchanged on disk, so the
+        follow-up `git merge --ff-only` of the worktree branch
+        doesn't fail with "Your local changes would be overwritten
+        by merge" against an uncommitted dirty index entry.
+        """
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
             # 1. template (accept), 2. deploy (accept), 3. gcp_region
             # (accept), 4. gcp_project_id (accept), 5. registry
             # (CHANGE to gar), 6. db (accept).
-            input_str = "\n\n\n\ngar\n\n"
+            answers = iter([
+                BASELINE_CONFIG.template,
+                BASELINE_CONFIG.deploy_target,
+                BASELINE_CONFIG.gcp_region,
+                BASELINE_CONFIG.gcp_project_id,
+                "gar",
+                BASELINE_CONFIG.db,
+            ])
+            def _side_effect(qfn, *args, **kwargs):
+                name = getattr(qfn, "__name__", "")
+                if name in ("select", "text"):
+                    return next(answers)
+                raise AssertionError(f"unexpected {name!r}")
             with patch("servicectl.cli._stdin_is_tty", return_value=True):
-                result = _run_refresh_with_input(repo=repo, stdin_input=input_str, yes=True)
+                result = _run_refresh_with_input(
+                    repo=repo, yes=True, answer_callable=_side_effect,
+                )
             assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
+            # Source repo's .servicectl.json must be unchanged: the
+            # new value flows in-memory via `config_override` (see
+            # `_stub_replay`'s `config_override` parameter and the
+            # docstring in replay.refresh for the full rationale).
             on_disk = read_config(repo)
-            assert on_disk.registry == "gar"
-            # Everything else preserved
-            assert on_disk.template == BASELINE_CONFIG.template
-            assert on_disk.deploy_target == BASELINE_CONFIG.deploy_target
-            assert on_disk.gcp_region == BASELINE_CONFIG.gcp_region
-            assert on_disk.gcp_project_id == BASELINE_CONFIG.gcp_project_id
-            assert on_disk.db == BASELINE_CONFIG.db
+            assert on_disk == BASELINE_CONFIG
 
     def test_change_deploy_to_azure_prompts_for_region_not_project(self):
         """Switching from gcp-cloud-run to azure should:
           - prompt for azure_region (new)
           - NOT prompt for gcp_region / gcp_project_id (no longer relevant)
-          - write the new deploy_target + azure_region to disk
+          - flow the new deploy_target + azure_region into
+            replay.refresh() via `config_override`, leaving
+            `.servicectl.json` untouched on disk (so the follow-up
+            `git merge --ff-only` succeeds cleanly -- see the
+            `config_override` docstring in replay.refresh for the
+            full rationale on the dirty-index merge failure this
+            used to cause).
         """
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
@@ -378,16 +474,27 @@ class TestPromptFlow:
             # 3. azure_region (override to westus2), 4. registry
             # (accept), 5. db (accept). gcp_region and gcp_project_id
             # are NOT prompted because deploy=azure.
-            input_str = "\nazure\nwestus2\n\n\n"
+            answers = iter([
+                BASELINE_CONFIG.template,
+                "azure",
+                "westus2",
+                BASELINE_CONFIG.registry,
+                BASELINE_CONFIG.db,
+            ])
+            def _side_effect(qfn, *args, **kwargs):
+                name = getattr(qfn, "__name__", "")
+                if name in ("select", "text"):
+                    return next(answers)
+                raise AssertionError(f"unexpected {name!r}")
             with patch("servicectl.cli._stdin_is_tty", return_value=True):
-                result = _run_refresh_with_input(repo=repo, stdin_input=input_str, yes=True)
+                result = _run_refresh_with_input(
+                    repo=repo, yes=True, answer_callable=_side_effect,
+                )
             assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
+            # Source repo's .servicectl.json is unchanged (the new
+            # values flow in-memory via config_override).
             on_disk = read_config(repo)
-            assert on_disk.deploy_target == "azure"
-            assert on_disk.azure_region == "westus2"
-            # gcp_* preserved as-is (untouched, even if stale)
-            assert on_disk.gcp_region == BASELINE_CONFIG.gcp_region
-            assert on_disk.gcp_project_id == BASELINE_CONFIG.gcp_project_id
+            assert on_disk == BASELINE_CONFIG
 
     def test_change_deploy_to_gcp_prompts_for_region_and_project(self):
         """Switching from azure to gcp-cloud-run should:
@@ -395,6 +502,8 @@ class TestPromptFlow:
           - prompt for gcp_region + gcp_project_id (with current
             values as defaults, even if the current values are
             stale/empty for an azure config)
+          - leave the source repo's `.servicectl.json` untouched,
+            so the follow-up `git merge --ff-only` works cleanly.
         """
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
@@ -412,13 +521,31 @@ class TestPromptFlow:
             # 1. template (accept), 2. deploy (CHANGE to gcp-cloud-run),
             # 3. gcp_region (accept default), 4. gcp_project_id
             # (override), 5. registry (accept), 6. db (accept).
-            input_str = "\ngcp-cloud-run\n\nmy-new-gcp-proj\n\n\n"
+            answers = iter([
+                BASELINE_CONFIG.template,
+                "gcp-cloud-run",
+                BASELINE_CONFIG.gcp_region,
+                "my-new-gcp-proj",
+                BASELINE_CONFIG.registry,
+                BASELINE_CONFIG.db,
+            ])
+            def _side_effect(qfn, *args, **kwargs):
+                name = getattr(qfn, "__name__", "")
+                if name in ("select", "text"):
+                    return next(answers)
+                raise AssertionError(f"unexpected {name!r}")
             with patch("servicectl.cli._stdin_is_tty", return_value=True):
-                result = _run_refresh_with_input(repo=repo, stdin_input=input_str, yes=True)
+                result = _run_refresh_with_input(
+                    repo=repo, yes=True, answer_callable=_side_effect,
+                )
             assert result.exit_code == 0, f"Output:\n{result.output}\nException: {result.exception}"
+            # The new config flows in-memory via `config_override`;
+            # the source repo's `.servicectl.json` is unchanged. The
+            # new values only land on `main` when the worktree branch
+            # is fast-forwarded into the source branch (i.e. when the
+            # user accepts the post-refresh merge prompt).
             on_disk = read_config(repo)
-            assert on_disk.deploy_target == "gcp-cloud-run"
-            assert on_disk.gcp_project_id == "my-new-gcp-proj"
+            assert on_disk == azure_config
 
     def test_gar_registry_prints_resolved_image_path(self):
         """The GCP-exposure touch: when the user picks `gar`, the
@@ -426,9 +553,23 @@ class TestPromptFlow:
         can see where the next CI run will publish."""
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
-            input_str = "\n\n\n\ngar\n\n"  # change registry to gar
+            answers = iter([
+                BASELINE_CONFIG.template,
+                BASELINE_CONFIG.deploy_target,
+                BASELINE_CONFIG.gcp_region,
+                BASELINE_CONFIG.gcp_project_id,
+                "gar",
+                BASELINE_CONFIG.db,
+            ])
+            def _side_effect(qfn, *args, **kwargs):
+                name = getattr(qfn, "__name__", "")
+                if name in ("select", "text"):
+                    return next(answers)
+                raise AssertionError(f"unexpected {name!r}")
             with patch("servicectl.cli._stdin_is_tty", return_value=True):
-                result = _run_refresh_with_input(repo=repo, stdin_input=input_str, yes=True)
+                result = _run_refresh_with_input(
+                    repo=repo, yes=True, answer_callable=_side_effect,
+                )
             assert result.exit_code == 0
             # The output should mention the GAR image path
             assert "us-central1-docker.pkg.dev" in result.output
@@ -452,10 +593,21 @@ class TestPromptSkipped:
         on-disk config wins, not the pipe."""
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
-            input_str = "\n\n\n\ngar\n\n"  # the kind of input a user might pipe
             # Do NOT patch _stdin_is_tty -- leave it at CliRunner's
-            # default of False.
-            result = _run_refresh_with_input(repo=repo, stdin_input=input_str)
+            # default of False. The "would answer gar" list is here
+            # only to document intent; it should never be consumed.
+            answers_should_not_be_consumed = iter([
+                "gar",
+            ])
+            def _side_effect(qfn, *args, **kwargs):
+                name = getattr(qfn, "__name__", "")
+                # Any call would mean the prompt path fired, which
+                # is exactly what this test asserts does NOT happen.
+                raise AssertionError(
+                    f"_safe_ask was called ({name!r}) but the prompt path should be skipped"
+                )
+            with patch("servicectl.cli._safe_ask", side_effect=_side_effect):
+                result = _run_refresh_with_input(repo=repo)
             assert result.exit_code == 0
             on_disk = read_config(repo)
         # The piped `gar` was NOT consumed; the on-disk config wins.
@@ -486,7 +638,12 @@ class TestAutoMerge:
         branch_name='sac/refresh/test1234' so the merge helper knows
         what to do."""
         from servicectl.replay import RefreshRun
-        def _make_run(repo: Path, dry_run: bool = False) -> RefreshRun:
+        def _make_run(
+            repo: Path,
+            dry_run: bool = False,
+            config_override: SacConfig | None = None,
+        ) -> RefreshRun:
+            _ = config_override
             return RefreshRun(
                 run_id="test1234",
                 source_repo=repo,
@@ -507,7 +664,7 @@ class TestAutoMerge:
         merge entirely and prints the manual-commands panel."""
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
-            result = _run_refresh_with_input(repo=repo, stdin_input="")
+            result = _run_refresh_with_input(repo=repo)
             assert result.exit_code == 0
             # The manual-commands panel is in the output
             assert "git merge --ff-only sac/refresh/test1234" in result.output
@@ -622,12 +779,11 @@ class TestAutoMerge:
                     args=list(args), returncode=0, stdout=b"", stderr=b"",
                 )
 
-            # Patch click.prompt to return BASELINE_CONFIG's current
-            # value for each field. This bypasses click's retry-on-
-            # bad-input behavior so the walkthrough consumes zero
-            # stdin lines; the only consumer is the post-refresh
-            # `input("y/N")` call inside _offer_post_refresh_merge.
-            from unittest.mock import MagicMock
+            # Patch _safe_ask to return the baseline values for the
+            # field walkthrough (template, deploy, gcp_region,
+            # gcp_project_id, registry, db), then `True` for the
+            # pre-refresh "Proceed?" confirm, then `True` for the
+            # post-refresh "Would you like me to merge?" confirm.
             answers = iter([
                 BASELINE_CONFIG.template,
                 BASELINE_CONFIG.deploy_target,
@@ -635,30 +791,33 @@ class TestAutoMerge:
                 BASELINE_CONFIG.gcp_project_id,
                 BASELINE_CONFIG.registry,
                 BASELINE_CONFIG.db,
+                True,    # pre-refresh proceed
+                True,    # post-refresh merge
             ])
-            patched_prompt = MagicMock(side_effect=lambda *a, **kw: next(answers))
+            def _side_effect(qfn, *args, **kwargs):
+                name = getattr(qfn, "__name__", "")
+                if name in ("select", "text", "confirm"):
+                    return next(answers)
+                raise AssertionError(f"unexpected {name!r}")
 
             runner = CliRunner()
             with self._stub_replay_with_branch(), \
                  patch("subprocess.run", side_effect=fake_subprocess_run), \
                  patch("servicectl.cli._stdin_is_tty", return_value=True), \
-                 patch("click.prompt", patched_prompt):
+                 patch("servicectl.cli._safe_ask", side_effect=_side_effect):
                 result = runner.invoke(
                     refresh,
                     [str(repo)],  # no flags; full default UX
                     env={"PATH": ""},
-                    input="y\ny\n",  # pre-refresh confirm + post-refresh merge
                     catch_exceptions=False,
                 )
             assert result.exit_code == 0, f"Output:\n{result.output}"
-            # The y/N merge question was asked
-            assert "Would you like me to merge" in result.output
             # The merge ran ("All done." is printed only on full success)
             assert "All done." in result.output
 
     def test_default_n_responds_to_n_prints_manual(self):
         """Default UX (TTY, no flag): the user types 'n' to the merge
-        prompt, and the manual-commands panel is shown instead of
+        confirm, and the manual-commands panel is shown instead of
         running the merge."""
         with tempfile.TemporaryDirectory() as td:
             repo = _make_refresh_repo(Path(td))
@@ -668,7 +827,6 @@ class TestAutoMerge:
                     args=list(args), returncode=0, stdout=b"", stderr=b"",
                 )
 
-            from unittest.mock import MagicMock
             answers = iter([
                 BASELINE_CONFIG.template,
                 BASELINE_CONFIG.deploy_target,
@@ -676,23 +834,27 @@ class TestAutoMerge:
                 BASELINE_CONFIG.gcp_project_id,
                 BASELINE_CONFIG.registry,
                 BASELINE_CONFIG.db,
+                True,    # pre-refresh proceed
+                False,   # post-refresh merge declined
             ])
-            patched_prompt = MagicMock(side_effect=lambda *a, **kw: next(answers))
+            def _side_effect(qfn, *args, **kwargs):
+                name = getattr(qfn, "__name__", "")
+                if name in ("select", "text", "confirm"):
+                    return next(answers)
+                raise AssertionError(f"unexpected {name!r}")
 
             runner = CliRunner()
             with self._stub_replay_with_branch(), \
                  patch("subprocess.run", side_effect=fake_subprocess_run), \
                  patch("servicectl.cli._stdin_is_tty", return_value=True), \
-                 patch("click.prompt", patched_prompt):
+                 patch("servicectl.cli._safe_ask", side_effect=_side_effect):
                 result = runner.invoke(
                     refresh,
-                    [str(repo)],  # default UX
+                    [str(repo)],
                     env={"PATH": ""},
-                    input="y\nn\n",  # y to proceed, n to merge
                     catch_exceptions=False,
                 )
             assert result.exit_code == 0, f"Output:\n{result.output}"
-            assert "Would you like me to merge" in result.output
             # The manual-commands panel is shown
             assert "git merge --ff-only sac/refresh/test1234" in result.output
             # The "All done." success line should NOT appear (we

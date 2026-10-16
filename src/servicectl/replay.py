@@ -257,7 +257,11 @@ def cherry_pick(repo: Path, sha: str, recovery_ref: str = "") -> None:
 # ----- the main refresh flow -----
 
 
-def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
+def refresh(
+    source_repo: Path,
+    dry_run: bool = False,
+    config_override: SacConfig | None = None,
+) -> RefreshRun:
     """Run a refresh against `source_repo`.
 
     Steps:
@@ -282,6 +286,22 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
     config is still read so the dry-run report can show what would be
     regenerated.
 
+    `config_override` (optional) lets the caller supply a `SacConfig`
+    directly instead of reading `.servicectl.json` off disk. The CLI's
+    interactive prompt path uses this: the user accepts or changes
+    values at the prompt, the helper returns an in-memory `SacConfig`,
+    and the CLI passes that here without ever writing it to disk.
+    This avoids leaving the source repo's working tree dirty with a
+    prompt-confirmed `.servicectl.json` that would (a) block the
+    follow-up `git merge --ff-only` of the worktree branch with
+    "Your local changes to the following files would be overwritten
+    by merge" (the on-disk dirty index conflicts with the merge
+    even when the content matches) and (b) leave `git status`
+    showing the service as modified forever, since fast-forward
+    only updates `HEAD`/the index, not the working tree's dirtiness,
+    until the user commits or stashes. Pass `None` (the default)
+    to keep the original behavior of reading from disk.
+
     Raises:
         RefreshNotScaffoldedError if the repo has no SAC-managed commits.
         RefreshConfigMissing if .servicectl.json is missing.
@@ -290,16 +310,31 @@ def refresh(source_repo: Path, dry_run: bool = False) -> RefreshRun:
     # First, peek at the SAC config for the legacy anchor. We don't fail
     # if it's missing -- the legacy anchor is optional. We do need the
     # SAC_BASE_COMMIT field (or env var) before we can classify correctly.
+    #
+    # When `config_override` is supplied (the CLI's interactive prompt
+    # path), use it verbatim and skip the disk read. This keeps the
+    # source repo's working tree clean during refresh -- see the
+    # `config_override` docstring above for the full rationale. We
+    # still need `sac_base_commit` either way, so resolve it from
+    # whichever config object we have. If the caller passed an
+    # override and the on-disk file is also missing, that's not an
+    # error -- the override wins; we only fall through to
+    # RefreshConfigMissing below if `config` ends up None.
     sac_base_commit: str | None = None
     config: SacConfig | None = None
     try:
-        config = read_config(source_repo)
+        config = read_config(source_repo) if config_override is None else config_override
         sac_base_commit = resolve_sac_base_commit(config)
     except FileNotFoundError:
         # No .servicectl.json. We can still try classification with no
         # legacy anchor; if the repo carries SAC trailers natively,
         # we proceed (and the missing-config error fires below). If it
         # doesn't, we report RefreshNotScaffoldedError first.
+        #
+        # Note: with `config_override` set, `read_config()` is skipped
+        # and this `FileNotFoundError` catch is unreachable. We leave
+        # the `except` in place defensively in case a future call in
+        # this block starts reading from disk again.
         pass
 
     # Classify history. Errors from a bad SAC_BASE_COMMIT SHA surface
