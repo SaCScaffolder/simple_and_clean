@@ -116,6 +116,28 @@ class TestSafeAsk:
         assert "aborted" in mock_err.print.call_args.args[0].lower()
         mock_exit.assert_called_once_with(1)
 
+    def test_oserror_is_caught_and_prints_aborted(self):
+        """Defensive: when questionary's prompt-toolkit layer raises
+        OSError on a stdin pipe / detached console (e.g. `[Errno 22]
+        Invalid argument` from the Windows console buffer probe when
+        stdin is a closed pipe -- the `git push | refresh` case where
+        the pipe ends before questionary has finished initializing),
+        we still print `aborted.` and exit cleanly. Without this
+        catch the user sees a stack trace for an unrecoverable
+        environment-level failure they cannot fix."""
+        def _raise_oserror(*a, **kw):
+            raise OSError(22, "Invalid argument")
+        with patch("sys.exit") as mock_exit:
+            with patch("servicectl.cli.err_console") as mock_err:
+                _safe_ask(_raise_oserror)
+        # Only one print: the canonical `aborted.` line. OSError
+        # gets the same cheap treatment as KeyboardInterrupt / EOF
+        # (no diagnostic dump) because it's an environment-level
+        # failure, not a user-fixable config error.
+        mock_err.print.assert_called_once()
+        assert "aborted" in mock_err.print.call_args.args[0].lower()
+        mock_exit.assert_called_once_with(1)
+
     def test_invalid_default_raises_valueerror_at_construct_is_caught(self):
         """questionary.select(choices=..., default=X) raises
         ValueError at construct time if X is not in the choices. This
