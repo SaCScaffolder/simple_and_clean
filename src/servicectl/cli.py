@@ -116,7 +116,17 @@ def _safe_ask(questionary_fn, *args, **kwargs):
     """
     try:
         result = questionary_fn(*args, **kwargs).ask(kbi_msg="")
-    except (KeyboardInterrupt, EOFError):
+    except (KeyboardInterrupt, EOFError, OSError):
+        # OSError covers the case where questionary's prompt-toolkit
+        # layer raises on a stdin pipe / detached console: e.g.
+        # `[Errno 22] Invalid argument` from the Windows console
+        # buffer probe when stdin is a closed pipe (the `git push |
+        # refresh` case where the pipe is closed before questionary
+        # has finished initializing). It's a "we can't show the
+        # prompt at all" failure, not a user choice, so we treat
+        # it the same as Ctrl-C / EOF -- exit cleanly with
+        # "aborted." instead of dropping the user into a stack
+        # trace.
         result = None
     except ValueError as e:
         # An invalid `default` for questionary.select -- treat as
