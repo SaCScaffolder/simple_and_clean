@@ -68,3 +68,78 @@ variable "env_vars" {
   default     = {}
 }
 {% endif %}
+
+{% if gcp_postgres_enabled %}
+# --- Cloud SQL (postgres) variables ------------------------------------------
+#
+# Only present when --deploy=gcp-gke-autopilot --db=postgres. The cloudsql
+# module reads these and provisions a private-IP Postgres instance, a
+# random password (stored in Secret Manager), and an IAM grant of
+# `roles/cloudsql.client` to the runtime SA.
+
+variable "db_tier" {
+  description = "Cloud SQL tier. `db-f1-micro` ($9/mo) for dev; `db-custom-2-7680` (~$145/mo) for prod. See https://cloud.google.com/sql/pricing."
+  type        = string
+  default     = "db-f1-micro"
+}
+
+variable "db_name" {
+  description = "Application database name inside the postgres instance."
+  type        = string
+  default     = "app"
+}
+
+variable "db_user" {
+  description = "Application postgres user. Created at apply time with the random password from `random_password.db_password`."
+  type        = string
+  default     = "app"
+}
+
+variable "db_availability_type" {
+  description = "`ZONAL` (cheaper, no HA) or `REGIONAL` (HA, 2x cost). Set REGIONAL for prod, ZONAL for dev/staging via .tfvars."
+  type        = string
+  default     = "ZONAL"
+}
+
+variable "db_disk_size_gb" {
+  description = "Disk size in GB. Cloud SQL requires a minimum of 10 GB."
+  type        = number
+  default     = 10
+}
+
+variable "db_backup_enabled" {
+  description = "Enable automated daily backups. On for prod, off for dev/staging (cost)."
+  type        = bool
+  default     = false
+}
+
+variable "db_backup_start_time" {
+  description = "HH:MM (24h, UTC) when the daily backup window starts. Ignored if `db_backup_enabled = false`."
+  type        = string
+  default     = "04:00"
+}
+
+variable "db_pitr_enabled" {
+  description = "Enable point-in-time recovery. On for prod, off for dev/staging."
+  type        = bool
+  default     = false
+}
+
+variable "pods_subnet_cidr" {
+  description = "CIDR for the GKE pods subnetwork primary range. /20 or larger."
+  type        = string
+  default     = "10.20.0.0/20"
+}
+
+variable "pods_secondary_cidr" {
+  description = "CIDR for the GKE pods secondary range. /14 or larger per Autopilot requirements."
+  type        = string
+  default     = "10.24.0.0/14"
+}
+
+variable "services_secondary_cidr" {
+  description = "CIDR for the GKE services secondary range. /20 is plenty for a single-service portfolio piece."
+  type        = string
+  default     = "10.28.0.0/20"
+}
+{% endif %}

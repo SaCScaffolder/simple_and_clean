@@ -18,3 +18,20 @@ env_vars = {
   ENV       = "prod"
 }
 {% endif %}
+
+{% if gcp_postgres_enabled %}
+# Cloud SQL (postgres) for prod: HA, backups, PITR. The tier
+# (db-custom-2-7680 = 2 vCPU / 7.5 GB) is appropriate for a small
+# service; bump via the cluster's admin console if you need more.
+db_tier              = "db-custom-2-7680"
+db_name              = "sac"
+db_user              = "sac"
+db_availability_type = "REGIONAL"
+db_disk_size_gb      = 20
+db_backup_enabled    = true
+db_pitr_enabled      = true
+
+pods_subnet_cidr        = "10.40.0.0/20"
+pods_secondary_cidr     = "10.44.0.0/14"
+services_secondary_cidr = "10.48.0.0/20"
+{% endif %}

@@ -1,0 +1,51 @@
+// Cloud SQL module outputs.
+
+output "instance_name" {
+  description = "Name of the Cloud SQL instance (used by `google_sql_database` and `google_sql_user`)."
+  value       = google_sql_database_instance.main.name
+}
+
+output "connection_name" {
+  description = "Connection name of the form `<project>:<region>:<instance>`. This is the value the Cloud SQL Auth Proxy sidecar (see k8s/cloudsql-proxy.yaml) takes as `--instance`."
+  value       = google_sql_database_instance.main.connection_name
+}
+
+output "private_ip" {
+  description = "Private IP address of the postgres instance, reachable only from inside the VPC (or peered networks)."
+  value       = google_sql_database_instance.main.private_ip_address
+}
+
+output "database_name" {
+  description = "Application database name. The Go service's `DATABASE_URL` references this as the path component."
+  value       = google_sql_database.main.name
+}
+
+output "database_user" {
+  description = "Application database user. The Go service's `DATABASE_URL` references this as the userinfo component."
+  value       = google_sql_user.main.name
+}
+
+output "password_secret_id" {
+  description = "Secret Manager secret ID for the random DB password. `deploy.yml` (PR 3) fetches the latest version into a k8s Secret named `db-credentials`."
+  value       = google_secret_manager_secret.db_password.secret_id
+}
+
+output "vpc_self_link" {
+  description = "Self-link of the VPC created by this module. The gke_autopilot module needs this to put the cluster on the same network."
+  value       = google_compute_network.main.self_link
+}
+
+output "pods_subnet_self_link" {
+  description = "Self-link of the pods subnetwork. The gke_autopilot module needs this to assign pod IP ranges to the cluster."
+  value       = google_compute_subnetwork.pods.self_link
+}
+
+output "pods_secondary_range_name" {
+  description = "Name of the pods secondary range (`pods`). The gke_autopilot module passes this as the cluster's `cluster_ipv4_cidr_block` alias."
+  value       = "pods"
+}
+
+output "services_secondary_range_name" {
+  description = "Name of the services secondary range (`services`). The gke_autopilot module passes this as the cluster's `services_ipv4_cidr_block` alias."
+  value       = "services"
+}

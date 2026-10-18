@@ -148,6 +148,13 @@ class ServiceGenerator:
         is_gcp_cloud_run = self.deploy_target == "gcp-cloud-run"
         is_gcp_gke_autopilot = self.deploy_target == "gcp-gke-autopilot"
         is_gcp = is_gcp_cloud_run or is_gcp_gke_autopilot
+        # `gcp_postgres_enabled` is the cross-product flag: postgres is
+        # supported on `gcp-gke-autopilot` only (not `gcp-cloud-run` -- that
+        # overlay is a separate piece of work, see BACKLOG.md). The flag
+        # is read by `deploy/gcp/infra/main.tf.j2` and the per-env
+        # `.tfvars.j2` files so the cloudsql module and its vars only
+        # show up when the user actually asked for postgres.
+        gcp_postgres_enabled = is_gcp_gke_autopilot and self.db == "postgres"
         return {
             "service_name": self.name,
             "service_name_snake": self.name.replace("-", "_").replace(".", "_"),
@@ -161,6 +168,7 @@ class ServiceGenerator:
             "gcp_project_id": self.gcp_project_id or "REPLACE_WITH_GCP_PROJECT_ID",
             "gcp_cloud_run_enabled": is_gcp_cloud_run,
             "gcp_gke_autopilot_enabled": is_gcp_gke_autopilot,
+            "gcp_postgres_enabled": gcp_postgres_enabled,
             "coverage_threshold": self.coverage_threshold,
             "registry": self.registry,
             "db": self.db,

@@ -18,3 +18,19 @@ env_vars = {
   ENV       = "staging"
 }
 {% endif %}
+
+{% if gcp_postgres_enabled %}
+# Cloud SQL (postgres) for staging: same tier as dev (cost-controlled),
+# but with backups on so we can validate backup/restore before prod.
+db_tier              = "db-f1-micro"
+db_name              = "sac"
+db_user              = "sac"
+db_availability_type = "ZONAL"
+db_disk_size_gb      = 10
+db_backup_enabled    = true
+db_pitr_enabled      = false
+
+pods_subnet_cidr        = "10.30.0.0/20"
+pods_secondary_cidr     = "10.34.0.0/14"
+services_secondary_cidr = "10.38.0.0/20"
+{% endif %}

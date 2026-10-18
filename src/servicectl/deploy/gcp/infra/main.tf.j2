@@ -173,6 +173,15 @@ module "gke_autopilot" {
   runtime_sa_email      = google_service_account.runtime.email
   artifact_registry_repo = google_artifact_registry_repository.images.name
   environment           = var.environment
+{% if gcp_postgres_enabled %}
+  # When postgres is enabled, the cluster must live on the same VPC
+  # and subnetwork that the cloudsql module creates (so the Cloud
+  # SQL Auth Proxy sidecar can reach the instance on its private IP).
+  network_self_link        = module.cloudsql.vpc_self_link
+  pods_subnet_self_link    = module.cloudsql.pods_subnet_self_link
+  pods_secondary_range     = module.cloudsql.pods_secondary_range_name
+  services_secondary_range = module.cloudsql.services_secondary_range_name
+{% endif %}
 }
 
 # Allow the kustomize base to pull from the Artifact Registry.
@@ -183,4 +192,38 @@ resource "google_artifact_registry_repository_iam_member" "runtime_pull" {
   role       = "roles/artifactregistry.reader"
   member     = "serviceAccount:${google_service_account.runtime.email}"
 }
+
+{% if gcp_postgres_enabled %}
+# --- Postgres (Cloud SQL) ---------------------------------------------------
+#
+# Provisions a managed Postgres instance on a private IP inside the
+# same VPC the GKE cluster lives in. Pods reach the instance via the
+# Cloud SQL Auth Proxy sidecar (see k8s/cloudsql-proxy.yaml in PR 2)
+# using a connection name of the form `<project>:<region>:<instance>`.
+#
+# The random password is generated here and stored in Secret Manager;
+# `deploy.yml` (PR 3) syncs it into a k8s Secret as `db-credentials`.
+module "cloudsql" {
+  source = "./modules/cloudsql"
+
+  project_id       = var.project_id
+  region           = var.region
+  environment      = var.environment
+  service_name     = "{{ service_name }}"
+  runtime_sa_email = google_service_account.runtime.email
+
+  db_tier              = var.db_tier
+  db_name              = var.db_name
+  db_user              = var.db_user
+  db_availability_type = var.db_availability_type
+  db_disk_size_gb      = var.db_disk_size_gb
+  db_backup_enabled    = var.db_backup_enabled
+  db_backup_start_time = var.db_backup_start_time
+  db_pitr_enabled      = var.db_pitr_enabled
+
+  pods_subnet_cidr        = var.pods_subnet_cidr
+  pods_secondary_cidr     = var.pods_secondary_cidr
+  services_secondary_cidr = var.services_secondary_cidr
+}
+{% endif %}
 {% endif %}

@@ -19,3 +19,22 @@ env_vars = {
   # Add non-secret env vars here. Secrets belong in Secret Manager.
 }
 {% endif %}
+
+{% if gcp_postgres_enabled %}
+# Cloud SQL (postgres) for dev: smallest tier, no backups, no PITR, no HA.
+# Total dev cost: $9/mo for db-f1-micro + GKE Autopilot control plane.
+db_tier              = "db-f1-micro"
+db_name              = "sac"
+db_user              = "sac"
+db_availability_type = "ZONAL"
+db_disk_size_gb      = 10
+db_backup_enabled    = false
+db_pitr_enabled      = false
+
+# VPC / subnet CIDRs are dev-specific. These defaults match the
+# module's own defaults; override here only if the dev project has
+# colliding ranges.
+pods_subnet_cidr        = "10.20.0.0/20"
+pods_secondary_cidr     = "10.24.0.0/14"
+services_secondary_cidr = "10.28.0.0/20"
+{% endif %}

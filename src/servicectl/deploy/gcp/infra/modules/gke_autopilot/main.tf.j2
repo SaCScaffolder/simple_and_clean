@@ -29,6 +29,35 @@ resource "google_container_cluster" "autopilot" {
     workload_pool = "${var.project_id}.svc.id.goog"
   }
 
+  # Network config: when `network_self_link` is set (postgres overlay),
+  # the cluster is created on the cloudsql module's VPC with explicit
+  # pod/service secondary ranges. When unset, the cluster falls back to
+  # the project's default network (the pre-postgres path).
+  dynamic "network_config" {
+    for_each = var.network_self_link == null ? [] : [var.network_self_link]
+    content {
+      network                = var.network_self_link
+      subnetwork             = var.pods_subnet_self_link
+      enable_intra_node_visibility = true
+      default_snat_status {
+        disabled = true
+      }
+      datapath_provider = "ADVANCED_DATAPATH"
+    }
+  }
+
+  # IP allocation policy: only set when running on a custom VPC (postgres
+  # overlay). The cluster_ipv4_cidr_block and services_ipv4_cidr_block
+  # are the *names* of the subnetwork's secondary ranges, not CIDR
+  # strings -- Autopilot reads the actual CIDRs from the subnetwork.
+  dynamic "ip_allocation_policy" {
+    for_each = var.network_self_link == null ? [] : [var.network_self_link]
+    content {
+      cluster_secondary_range_name  = var.pods_secondary_range
+      services_secondary_range_name = var.services_secondary_range
+    }
+  }
+
   # We intentionally disable the legacy ABAC / basic-auth paths.
   # RBAC is the only auth model.
   enable_legacy_abac = false
