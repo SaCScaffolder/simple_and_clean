@@ -1,0 +1,97 @@
+// Cloud SQL module input variables.
+
+variable "project_id" {
+  type        = string
+  description = "GCP project ID."
+}
+
+variable "region" {
+  type        = string
+  description = "GCP region for the Cloud SQL instance. Must match the GKE cluster region so the Auth Proxy sidecar uses a same-region connection name."
+}
+
+variable "environment" {
+  type        = string
+  description = "Environment name (dev/staging/prod). Used in resource naming and prod-specific guards (deletion_protection)."
+}
+
+variable "service_name" {
+  type        = string
+  description = "Service name. Drives the database instance name (`<service_name>-<environment>`)."
+}
+
+variable "db_tier" {
+  type        = string
+  description = "Cloud SQL tier (e.g. `db-f1-micro` for dev, `db-custom-2-7680` for prod). Drives the price/performance point."
+  default     = "db-f1-micro"
+}
+
+variable "db_name" {
+  type        = string
+  description = "Application database name inside the postgres instance (e.g. `myapp`). Created at apply time via `google_sql_database`."
+  default     = "app"
+}
+
+variable "db_user" {
+  type        = string
+  description = "Application postgres user. Created at apply time via `google_sql_user` with the random password from `random_password.db_password`."
+  default     = "app"
+}
+
+variable "db_availability_type" {
+  type        = string
+  description = "`ZONAL` (cheaper, no HA) or `REGIONAL` (HA, 2x cost). Set to REGIONAL for prod, ZONAL for dev/staging via .tfvars."
+  default     = "ZONAL"
+
+  validation {
+    condition     = contains(["ZONAL", "REGIONAL"], var.db_availability_type)
+    error_message = "db_availability_type must be ZONAL or REGIONAL."
+  }
+}
+
+variable "db_disk_size_gb" {
+  type        = number
+  description = "Disk size in GB. Cloud SQL requires a minimum of 10 GB."
+  default     = 10
+}
+
+variable "db_backup_enabled" {
+  type        = bool
+  description = "Enable automated daily backups. On for prod, off for dev/staging (cost)."
+  default     = false
+}
+
+variable "db_backup_start_time" {
+  type        = string
+  description = "HH:MM (24h, UTC) when the daily backup window starts. Ignored if `db_backup_enabled = false`."
+  default     = "04:00"
+}
+
+variable "db_pitr_enabled" {
+  type        = bool
+  description = "Enable point-in-time recovery. On for prod (requires `db_backup_enabled = true`), off for dev/staging."
+  default     = false
+}
+
+variable "runtime_sa_email" {
+  type        = string
+  description = "Email of the runtime service account. Gets `roles/cloudsql.client` and `roles/secretmanager.secretAccessor` for the DB password secret."
+}
+
+variable "pods_subnet_cidr" {
+  type        = string
+  description = "CIDR for the GKE pods subnetwork primary range. Must be a /20 or larger."
+  default     = "10.20.0.0/20"
+}
+
+variable "pods_secondary_cidr" {
+  type        = string
+  description = "CIDR for the GKE pods secondary range (where Autopilot places pods). Must be a /14 or larger per Autopilot requirements."
+  default     = "10.24.0.0/14"
+}
+
+variable "services_secondary_cidr" {
+  type        = string
+  description = "CIDR for the GKE services secondary range (ClusterIPs). /20 is plenty for a single-service portfolio piece."
+  default     = "10.28.0.0/20"
+}

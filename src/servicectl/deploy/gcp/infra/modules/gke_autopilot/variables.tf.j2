@@ -25,5 +25,29 @@ variable "artifact_registry_repo" {
 
 variable "environment" {
   type        = string
-  description = "Environment name (dev/staging/prod). Used in resource naming."
+  description = "Environment name (dev/staging/prod). Used in resource naming and (for cloudsql) deletion_protection."
+}
+
+variable "network_self_link" {
+  type        = string
+  description = "Self-link of the VPC the cluster should be created on. When unset, the cluster is created on the project's default network (only valid for --db=none, not --db=postgres, because the cloudsql module needs the cluster on its own VPC)."
+  default     = null
+}
+
+variable "pods_subnet_self_link" {
+  type        = string
+  description = "Self-link of the subnetwork the cluster's pods will be placed on. Required when `network_self_link` is set (postgres overlay)."
+  default     = null
+}
+
+variable "pods_secondary_range" {
+  type        = string
+  description = "Name of the subnetwork's secondary range for pod IPs (default: `pods`). Required when `pods_subnet_self_link` is set."
+  default     = null
+}
+
+variable "services_secondary_range" {
+  type        = string
+  description = "Name of the subnetwork's secondary range for service ClusterIPs (default: `services`). Required when `pods_subnet_self_link` is set."
+  default     = null
 }
