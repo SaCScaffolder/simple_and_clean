@@ -1,0 +1,73 @@
+# {{ service_name }} — base Ingress.
+#
+# Uses the GCE ingress class (not the GKE-native one) so we get
+# a Google Cloud Load Balancer in front of the Service. The
+# `networking.gke.io/v1` ManagedCertificate is what provisions
+# a free Google-managed TLS cert; the cert is auto-renewed by
+# GKE and attached to the load balancer once DNS is in place.
+#
+# The dev overlay (overlays/dev/kustomization.yaml.j2) sets the
+# host to `<service>.35.<x>.<x>.<x>.nip.io` -- nip.io's wildcard
+# DNS means any `<anything>.<IP>.nip.io` hostname resolves to
+# `<IP>`, which lets us hit the load balancer with a real
+# hostname (required for ManagedCertificate) without owning a
+# domain. The prod overlay (overlays/prod/kustomization.yaml.j2)
+# is where the real domain is plugged in.
+#
+# Why the GCE class and not the GKE-native Ingress: GCE Ingress
+# is what ManagedCertificate integrates with. The GKE-native
+# Ingress (anthos) is for multi-cluster; for a single-cluster
+# portfolio piece, GCE is simpler and what the docs recommend.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ service_name }}
+  labels:
+    app: {{ service_name }}
+    managed_by: servicectl
+  annotations:
+    # Use the GCE ingress class (creates a Google Cloud Load Balancer).
+    kubernetes.io/ingress.class: gce
+    # Allow the cert to be issued and renewed for the domain set
+    # in spec.rules[0].host. The cert is managed by GKE; we don't
+    # need to provision anything outside the cluster for it.
+    networking.gke.io/managed-certificates: {{ service_name }}-cert
+spec:
+  # Default backend if no rule matches. GCE Ingress requires a
+  # default backend; we point it at the Service so the load
+  # balancer is at least healthy even if the ManagedCertificate
+  # hasn't been issued yet.
+  defaultBackend:
+    service:
+      name: {{ service_name }}
+      port:
+        number: 80
+  rules:
+    - host: {{ service_hostname }}
+      http:
+        paths:
+          - path: /*
+            pathType: implementationSpecific
+            backend:
+              service:
+                name: {{ service_name }}
+                port:
+                  number: 80
+---
+# ManagedCertificate for the host. Provisioned automatically by
+# GKE; the cert attaches to the GCE load balancer once the
+# hostname's DNS resolves to the load balancer's IP. For nip.io
+# hostnames (dev), this happens within seconds of the load
+# balancer being created. For real domains, the user has to
+# point an A record at the load balancer's IP before the cert
+# will issue.
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: {{ service_name }}-cert
+  labels:
+    app: {{ service_name }}
+    managed_by: servicectl
+spec:
+  domains:
+    - {{ service_hostname }}

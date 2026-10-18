@@ -1,0 +1,24 @@
+# {{ service_name }} — base kustomization.
+#
+# Lists the base manifests and provides a default image. The
+# dev/prod overlays patch this file via `kustomize edit set image`
+# (run by deploy.yml) to swap in the SHA-tagged image for each
+# environment.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - serviceaccount.yaml
+  - service.yaml
+  - deployment.yaml
+{% if gcp_postgres_enabled %}  - secret.yaml
+  - cloudsql-proxy.yaml
+{% endif %}  - ingress.yaml
+images:
+  - name: {{ image_name }}
+    newName: {{ image_name }}
+    # The actual SHA tag is patched in by the overlay's
+    # `kustomize edit set image {{ service_name }}=<image>:<sha>`
+    # call in deploy.yml. Leaving `newTag` empty here means
+    # the base always uses whatever the overlay (or the latest
+    # default if no overlay is applied) selects.
+    newTag: latest

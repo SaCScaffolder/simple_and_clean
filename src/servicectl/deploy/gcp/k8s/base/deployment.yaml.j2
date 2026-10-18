@@ -1,0 +1,123 @@
+# {{ service_name }} — base Deployment.
+#
+# Single container running the service image from Artifact Registry.
+# The cloudsql-proxy sidecar lives in a separate Deployment in this
+# directory (cloudsql-proxy.yaml.j2) so the two containers can be
+# scaled and updated independently. They share a Service and a k8s
+# ServiceAccount so the proxy's localhost listener is reachable from
+# the app via the service's ClusterIP on port 5432.
+#
+# Probe targets:
+#   - /healthz: always 200 if the process is up. Used by the
+#     livenessProbe; a failed livenessProbe restarts the pod.
+#   - /readyz: 200 only when the app's readiness checks pass (which
+#     includes the DB connection, when postgres is enabled -- see
+#     PR 3 for the deploy.yml secret-sync step and the readiness
+#     check wiring). Used by the readinessProbe; a failed
+#     readinessProbe pulls the pod out of the Service endpoints
+#     but does not restart it.
+#
+# Security context: runAsNonRoot, readOnlyRootFilesystem, and
+# allowPrivilegeEscalation: false are the GKE Autopilot defaults
+# for hardened workloads. The emptyDir volume at /tmp is required
+# because the Go HTTP server writes transient files there; without
+# readOnlyRootFilesystem: false, the server would crash on its
+# first multipart upload.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ service_name }}
+  labels:
+    app: {{ service_name }}
+    managed_by: servicectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ service_name }}
+  template:
+    metadata:
+      labels:
+        app: {{ service_name }}
+        managed_by: servicectl
+    spec:
+      serviceAccountName: {{ service_name }}
+      {% if gcp_postgres_enabled %}# The postgres password is bootstrapped into this Secret by
+      # deploy.yml (PR 3) right before `kubectl apply -k`. The Secret
+      # is not committed to the repo and is not created by kustomize
+      # directly (the contents are sensitive). The cloudsql-proxy
+      # sidecar reads its own copy from the same Secret via the
+      # `db-credentials-cloudsql-proxy` env var below.
+      {% endif %}containers:
+        - name: {{ service_name }}
+          image: {{ image_name }}:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            {% if gcp_postgres_enabled %}- name: DATABASE_URL
+              # Built from the Secret Manager outputs surfaced by
+              # Terraform (PR 1). The connection string uses the
+              # cloudsql-proxy's localhost listener on port 5432,
+              # NOT the private IP directly -- the proxy is what
+              # does the TLS + IAM auth translation.
+              value: "postgres://$(DB_USER):$(DB_PASSWORD)@127.0.0.1:5432/$(DB_NAME)?sslmode=disable"
+          envFrom:
+            - secretRef:
+                name: db-credentials
+          {% else %}env: []
+          {% endif %}resources:
+            # Defaults match the Go webapi's cloud_run module
+            # settings (1 vCPU / 512Mi). Autopilot bills per-pod
+            # per-second, so this is the floor of what the Go
+            # service needs to start cleanly.
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          # Liveness: if /healthz fails 3 times in a row (after
+          # initialDelay 10s, period 10s), the pod is restarted.
+          # This is the "process is up" check, not the "DB is
+          # reachable" check -- the DB is the readiness check.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # Readiness: /readyz must be 200 for the pod to receive
+          # traffic. The Go service returns 503 from /readyz when
+          # its dependency checks (including the DB ping, once PR
+          # 3 wires it up) fail, which pulls the pod out of the
+          # Service endpoints without restarting it.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # /tmp is the only writable path the Go HTTP server
+          # needs (transient multipart bodies, etc.). readOnlyRootFilesystem
+          # makes everything else read-only.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

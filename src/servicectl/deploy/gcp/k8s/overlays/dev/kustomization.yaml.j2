@@ -1,0 +1,50 @@
+# {{ service_name }} — dev overlay.
+#
+# Dev: one replica, no PDB, no autoscaling. The hostname is
+# `<service>.<gke_ingress_ip>.nip.io`, which lets the
+# ManagedCertificate provision a TLS cert without us owning a
+# domain. The actual ingress IP is filled in by deploy.yml (PR 3)
+# after `kubectl apply` creates the GCE load balancer and we read
+# the IP back via `kubectl get ingress -o jsonpath`.
+#
+# Until deploy.yml is in place, the placeholder nip.io hostname
+# `<service>.35.35.35.35.nip.io` is used. The cert won't issue
+# for that hostname (35.35.35.35 isn't a real LB IP), but the
+# rest of the manifest will apply cleanly and the Service +
+# Deployment will come up; only HTTPS will be broken.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: default
+resources:
+  - ../../base
+namePrefix: dev-
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: {{ service_name }}
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: {{ service_name }}-cloudsql-proxy
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  # Patch the Ingress host to the nip.io hostname. Until deploy.yml
+  # is wired up (PR 3), the IP is a placeholder.
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: Ingress
+      name: {{ service_name }}
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: {{ service_hostname }}

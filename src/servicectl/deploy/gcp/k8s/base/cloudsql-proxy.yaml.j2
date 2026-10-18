@@ -1,0 +1,82 @@
+{% if gcp_postgres_enabled %}# {{ service_name }} — Cloud SQL Auth Proxy sidecar.
+#
+# The proxy runs as a second container in the same pod as the app
+# (separate Deployment so the two can be scaled independently). It
+# listens on 127.0.0.1:5432 inside the pod and forwards connections
+# to the Cloud SQL instance on its private IP. The app's
+# `DATABASE_URL` points at 127.0.0.1:5432, not the private IP
+# directly, because the proxy is what does the TLS + IAM auth
+# translation.
+#
+# Why a sidecar, not an in-process driver: the proxy is the only
+# officially-supported way to reach a private-IP Cloud SQL instance
+# from a GKE Autopilot pod without setting up a self-signed CA,
+# without opening the instance to a public IP, and without a
+# static service-account key. The Workload Identity binding
+# (configured out-of-band, documented in docs/gke-postgres-setup.md
+# in PR 4) gives the proxy's GCP SA the `cloudsql.client` IAM role
+# so it can mint short-lived certs.
+#
+# `--private-ip` is required because the cloudsql module
+# provisions the instance with `ipv4_enabled = false`. The proxy
+# defaults to public IP, which would fail to connect to a
+# private-only instance.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ service_name }}-cloudsql-proxy
+  labels:
+    app: {{ service_name }}
+    component: cloudsql-proxy
+    managed_by: servicectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ service_name }}
+      component: cloudsql-proxy
+  template:
+    metadata:
+      labels:
+        app: {{ service_name }}
+        component: cloudsql-proxy
+        managed_by: servicectl
+    spec:
+      serviceAccountName: {{ service_name }}
+      # The proxy image is the official Google-maintained one.
+      # It is a small (~10 MB) Go binary that does TLS + IAM auth
+      # against the Cloud SQL Admin API, then forwards plaintext
+      # postgres traffic to the private IP of the instance.
+      containers:
+        - name: cloudsql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2
+          # The connection name (`<project>:<region>:<instance>`)
+          # is the output of `terraform output db_connection_name`
+          # (PR 1), which deploy.yml (PR 3) renders into this
+          # manifest via `kustomize edit set image` for the
+          # service container and a `kustomize edit` for the arg
+          # list. For dev/staging, the kustomize overlay writes
+          # the value; for production, it is templated in here.
+          command:
+            - /cloud-sql-proxy
+            - --private-ip
+            - {{ db_connection_name }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          resources:
+            # The proxy is a thin forwarder; 100m / 64Mi is enough.
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+{% endif %}

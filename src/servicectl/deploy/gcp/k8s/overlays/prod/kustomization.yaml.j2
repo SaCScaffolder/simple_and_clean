@@ -1,0 +1,48 @@
+# {{ service_name }} — prod overlay.
+#
+# Prod: two replicas, PodDisruptionBudget to keep at least one
+# pod available during voluntary disruptions (node upgrades,
+# autoscaler scale-downs). The hostname is a real domain that
+# the user fills in via --domain=<your.domain>; until they do,
+# the ManagedCertificate will not issue.
+#
+# Replica count of 2 is the floor for HA without spending real
+# money. For a portfolio piece on a $73/mo Autopilot control
+# plane, 2 replicas of the smallest Go container is ~$15-20/mo
+# of compute on top of the cluster cost. The user can dial this
+# up via the overlay if they want more headroom.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: default
+resources:
+  - ../../base
+  - pdb.yaml
+namePrefix: prod-
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: {{ service_name }}
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: {{ service_name }}-cloudsql-proxy
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: Ingress
+      name: {{ service_name }}
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: {{ service_hostname }}

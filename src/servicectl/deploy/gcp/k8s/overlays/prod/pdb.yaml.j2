@@ -1,0 +1,19 @@
+# {{ service_name }} — prod PodDisruptionBudget.
+#
+# Keep at least one pod available during voluntary disruptions
+# (node upgrades, autoscaler scale-downs). With replicas: 2 in
+# the prod overlay, minAvailable: 1 lets one pod be evicted at
+# a time while the other keeps serving traffic. Without a PDB,
+# `kubectl drain` could take both pods down simultaneously.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ service_name }}
+  labels:
+    app: {{ service_name }}
+    managed_by: servicectl
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: {{ service_name }}
