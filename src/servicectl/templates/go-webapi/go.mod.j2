@@ -4,6 +4,15 @@ go 1.26
 
 require (
 {% if db == 'postgres' %}
-	github.com/jackc/pgx/v5 v5.7.1
+	github.com/jackc/pgx/v5 v5.9.0
+	// Pin golang.org/x/text to a non-vulnerable version. pgx
+	// v5.x requires x/text transitively (it pins v0.29.0), but
+	// v0.29.0 has two HIGH CVEs (CVE-2026-56851: Nickname
+	// profile OOB slice; CVE-2026-56852: DoS via invalid UTF-8),
+	// both fixed in v0.41.0+. Surfaced on the per-PR Trivy scan
+	// (run 39177248283, 2026-10-18). Direct-requiring v0.41.0
+	// forces MVS to pick v0.41.0 over pgx's v0.29.0 transitive
+	// (the max of the two), clearing the Trivy block.
+	golang.org/x/text v0.41.0
 {% endif %}
 )

@@ -140,6 +140,35 @@ class TestPostgresTemplateRendersNotes:
         t = _scaffold(scaffold_target, "postgres")
         text = (t / "go.mod").read_text()
         assert "github.com/jackc/pgx" in text
+        # Pin to a non-vulnerable pgx release. The CRITICAL CVEs in
+        # pgx v5.7.1 (CVE-2026-33815, -33816) and the HIGH CVEs in
+        # its transitive deps are fixed in v5.9.0+. Surfaced 2026-10-18
+        # by the per-PR Trivy scan blocking the build on the
+        # unmodified run. If a future bump lands here, update this
+        # assertion to match the new floor.
+        assert "github.com/jackc/pgx/v5 v5.9.0" in text
+        # Subpackages of a /vN/ module are NOT separate modules in
+        # Go's module system. An explicit `require
+        # github.com/jackc/pgx/v5/stdlib v5.9.0` is rejected by
+        # `go mod tidy` with "version \"v5.9.0\" invalid: should
+        # be v0 or v1, not v5" because the path's /v5/ segment
+        # already declares the major version. The stdlib
+        # subpackage is available at v5.9.0 implicitly via the
+        # parent require. Regression test: a future refactor
+        # that re-adds the stdlib require will fail locally
+        # before it fails in CI.
+        assert "pgx/v5/stdlib" not in text
+        # Pin golang.org/x/text to a non-vulnerable version. pgx
+        # transitively requires x/text v0.29.0 (per its own
+        # go.mod), but v0.29.0 has two HIGH CVEs
+        # (CVE-2026-56851, CVE-2026-56852) fixed in v0.41.0+.
+        # Direct-requiring v0.41.0 forces MVS to pick v0.41.0
+        # over pgx's v0.29.0 transitive, clearing the per-PR
+        # Trivy scan (run 39177248283, 2026-10-18). If a future
+        # refactor removes this pin, the next per-PR Trivy run
+        # will block on x/text again; the local test catches
+        # the regression before CI.
+        assert "golang.org/x/text v0.41.0" in text
 
 
 class TestNonPostgresTemplateSkipsNotes:
