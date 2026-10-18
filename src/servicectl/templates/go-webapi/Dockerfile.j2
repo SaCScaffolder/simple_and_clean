@@ -12,7 +12,15 @@ WORKDIR /src
 
 # Cache go.mod/go.sum first so dependency downloads don't bust on every code change.
 COPY go.mod go.sum* ./
-RUN go mod download
+# `go mod download` (the previous command) only writes the
+# `/go.mod h1:...` entries to go.sum. For a freshly-scaffolded
+# go.mod with no go.sum, it doesn't add the indirect entries to
+# go.mod for transitive deps, and the subsequent `go build` step
+# then complains about missing go.sum entries. `go mod tidy` is
+# the right command: it adds the `// indirect` lines, populates
+# go.sum with both kinds of hashes, and the build proceeds.
+# Same fix as the ci.yml workflow (2026-10-18).
+RUN go mod tidy
 
 # Now the source.
 COPY cmd ./cmd
