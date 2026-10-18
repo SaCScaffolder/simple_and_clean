@@ -144,3 +144,180 @@ If you're adding a subpackage that *re-implements* a Python rule (rather
 than mirroring or wrapping), that's a red flag. Either the Python CLI
 should own the rule, or the divergence should be documented at the top
 of the new subpackage's README.
+
+
+## Postgres on GKE (Autopilot)
+
+The GKE Autopilot overlay supports `--db=postgres` end-to-end. The
+design has four pieces, each with a specific job, and the seams
+between them are explicit. If you understand *why* each piece
+exists, you can debug the deploy when it breaks; if you only
+memorize the commands, you'll be stuck.
+
+### The four pieces
+
+```
+                ┌─────────────────────────────────────────────┐
+                │ GCP project (sacscaffolder)                 │
+                │ ┌─────────────────────────────────────────┐ │
+                │ │ VPC + private services range            │ │
+                │ │                                         │ │
+                │ │ ┌─────────────────────────────────┐     │ │
+                │ │ │ Cloud SQL (postgres 16)        │     │ │
+                │ │ │ private IP only                │     │ │
+                │ │ └────────────┬────────────────────┘     │ │
+                │ └──────────────┼──────────────────────────┘ │
+                │                │ private IP (10.x)          │
+                │ ┌──────────────▼──────────────────────────┐ │
+                │ │ GKE Autopilot cluster (same VPC)       │ │
+                │ │ ┌────────────────────────────────────┐ │ │
+                │ │ │ Pod                                │ │ │
+                │ │ │  ┌──────────┐  ┌─────────────────┐ │ │ │
+                │ │ │  │ App      │  │ cloudsql-proxy  │ │ │ │
+                │ │ │  │ :8080    │──│ :5432 localhost│ │ │ │
+                │ │ │  └────┬─────┘  └────────┬────────┘ │ │ │
+                │ │ └───────┼─────────────────┼──────────┘ │ │
+                │ │         │ Service (ClusterIP)         │ │
+                │ │         │ :80 -> :8080                │ │
+                │ │         │ :5432 -> proxy :5432        │ │
+                │ └─────────┼──────────────────────────────┘ │
+                │           │                                │
+                │  ┌────────▼───────────────────────────────┐ │
+                │  │ GCE Ingress + ManagedCertificate      │ │
+                │  │ host: <svc>.<lb-ip>.nip.io            │ │
+                │  └────────────────────────────────────────┘ │
+                └─────────────────────────────────────────────┘
+                                ▲
+                                │ WIF-authenticated deploy
+                                │ (deploy.yml GitHub Actions)
+                                │
+                ┌───────────────┴─────────────────────────────┐
+                │ Secret Manager (postgres password)         │
+                │   ↳ deploy.yml reads on every push         │
+                │   ↳ writes to k8s Secret db-credentials    │
+                │   ↳ Pod envFrom db-credentials             │
+                └─────────────────────────────────────────────┘
+```
+
+### Why each piece exists
+
+- **VPC + private services range.** Cloud SQL's `private IP only`
+  mode means the instance is reachable *only* from inside the
+  VPC. The GKE cluster's pods are on a subnetwork of the same
+  VPC, so the connection is internal. The `private services
+  access` peering (set up by Terraform's
+  `google_service_networking_connection`) is what makes
+  Cloud SQL's IP range reachable from the cluster at all.
+
+- **cloudsql-proxy sidecar.** Without it, every pod would need a
+  static postgres password (or a JSON key for the API). The
+  proxy runs in the same pod as the app, listens on
+  `127.0.0.1:5432`, and mints an ephemeral TLS cert on every
+  connection to the Cloud SQL Admin API. The cert is
+  short-lived; the proxy rotates it transparently. The app
+  connects to `127.0.0.1:5432` like it's a normal postgres
+  server.
+
+- **Workload Identity (k8s SA ↔ GCP SA).** The k8s ServiceAccount
+  the proxy runs as is annotated with
+  `iam.gke.io/gcp-service-account: <runtime-sa>@<project>.iam.gserviceaccount.com`.
+  GKE reads this annotation and binds the k8s SA to the GCP SA.
+  The GCP side of the binding is the
+  `gcloud iam service-accounts add-iam-policy-binding` command
+  in `gke-postgres-setup.md` (Half 2). When both halves are in
+  place, the proxy can call `generateEphemeralCert` on
+  `sqladmin.googleapis.com` without a JSON key.
+
+- **Secret Manager + k8s Secret sync.** The cloudsql module
+  generates a `random_password` and writes it to Secret Manager.
+  The k8s Secret is the bridge between Secret Manager and the
+  pod's `envFrom`. The deploy workflow re-creates the k8s
+  Secret on every push via
+  `kubectl create --dry-run=client -o yaml | kubectl apply -f -`,
+  so a rotated password takes effect on the next deploy.
+
+- **GCE Ingress + ManagedCertificate.** GCE Ingress creates a
+  Google Cloud Load Balancer in front of the Service. The
+  `networking.gke.io/v1` ManagedCertificate provisions a
+  free Google Trust Services cert, which attaches to the LB
+  once DNS resolves. For dev (nip.io hostnames) this is
+  automatic; for prod (real domain) the user has to point
+  an A record at the LB.
+
+- **The deploy workflow does the secret sync and the
+  ingress-host patch.** The secret sync has to run *before*
+  `kubectl apply` (so the k8s Secret exists when the
+  Deployment's `envFrom` resolves). The ingress-host patch
+  has to run *after* `kubectl apply` (because the LB IP
+  only exists once the Ingress is reconciled). The deploy
+  workflow's step order in `deploy.yml.j2` reflects this.
+
+### What the deploy workflow does NOT do
+
+A few things that look manual but aren't (or that the workflow
+deliberately does *not* do because they're one-time-per-project
+or one-time-per-cluster):
+
+- **WIF pool / provider / CI SA creation.** Lives in
+  `infra/bootstrap.sh` (one-time per project). Putting it in
+  Terraform would require the GitHub repo name as a `variable`,
+  which is a deploy-time input; keeping it in a shell script
+  makes that natural.
+
+- **The k8s SA ↔ GCP SA Workload Identity binding.** Lives in
+  `gke-postgres-setup.md` (one command, one time per project,
+  after the cluster and runtime SA both exist). Could be moved
+  to a `google_service_account_iam_policy` resource in
+  Terraform, but the timing — "after both resources exist" — is
+  awkward to express declaratively, and the one-time cost is
+  low.
+
+- **`gcloud container clusters get-credentials`.** This runs on
+  every deploy, not just the first. It's idempotent and fast
+  (re-points the kubeconfig to the same cluster). It does
+  *not* run on the bootstrap script because the cluster
+  doesn't exist yet.
+
+### Cost shape
+
+For the locked-in config (`sacscaffolder` / `us-central1` /
+`db-f1-micro` / GKE Autopilot), the monthly cost is dominated
+by the GCE Load Balancer (~$18/mo) and the Cloud SQL
+instance ($9/mo for `db-f1-micro`). GKE Autopilot is
+per-pod-billed, so a service that receives minimal traffic
+costs <$5/mo. Always-on total: ~$45-60/mo. For a portfolio
+piece that only needs to be up for a demo, the
+[tardown commands](gke-postgres-setup.md#teardown) drop the
+cost to zero in ~3 minutes.
+
+### Why not Cloud SQL Auth Proxy's sidecar-less mode?
+
+Cloud SQL offers a "private IP only" instance that's reachable
+from the VPC without the proxy. The proxy still adds value
+even in that mode: it handles TLS cert rotation, it gives you
+a single source of truth for the connection string
+(`127.0.0.1:5432`), and it lets the app code stay
+postgres-driver-agnostic (the app doesn't need to know it's
+talking through a proxy). The "extra container" cost is ~50ms
+of memory and zero CPU at idle. The alternative — using the
+private IP directly and managing certs in the app — is more
+code, more failure modes, and a worse portfolio story.
+
+### Why nip.io?
+
+`nip.io` is a free wildcard DNS service: any hostname of the
+form `<anything>.<ip>.nip.io` resolves to `<ip>`. So once the
+GCE LB has an IP (say, `35.192.0.1`), the hostname
+`demo.35.192.0.1.nip.io` resolves to that IP without you
+owning a domain or running a DNS server. The
+`networking.gke.io/v1` ManagedCertificate will then issue a
+Google Trust Services cert for that hostname. The result: a
+real, working HTTPS URL on a real cluster, with no domain
+purchase, no DNS setup, and a one-line teardown.
+
+The catch: nip.io hostnames look weird in screenshots
+(`demo.35.192.0.1.nip.io` instead of `demo.example.com`).
+That's the explicit trade-off this overlay makes — fast and
+free, but cosmetically raw. Production deploys swap in a real
+domain by editing `k8s/overlays/prod/kustomization.yaml.j2`'s
+Ingress patch.
