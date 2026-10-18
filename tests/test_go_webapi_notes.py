@@ -215,3 +215,133 @@ class TestServerScaffoldConsistency:
             assert "func NewMux()" in text
             # NewMux's body should call NewServer(nil) -- no DB.
             assert "NewServer(nil)" in text
+
+
+class TestPostgresTestFileCoversCodePaths:
+    """The scaffolded server_test.go and main_test.go must include
+    Go tests that exercise the postgres code paths. Without these
+    tests, the postgres render's coverage drops to ~22% on
+    internal/<svc> and ~43% on cmd/server -- well below the 80%
+    coverage gate.
+
+    Regression guard for the failure on PR #139's integration test
+    (run 39173691560, 2026-10-18): the postgres code paths were
+    implemented but not tested, and the per-PR CI's
+    `go test -cover` step failed the 80% gate at 31.7% total
+    coverage.
+    """
+
+    def test_postgres_server_test_has_readyz_with_db(self, scaffold_target):
+        """The postgres render of server_test.go must include
+        TestReadyzWithDB, which exercises the /readyz ping path
+        against a real DB."""
+        t = _scaffold(scaffold_target, db="postgres")
+        text = (t / "internal" / "demo" / "server_test.go").read_text()
+        assert "TestReadyzWithDB" in text, (
+            "postgres server_test.go missing TestReadyzWithDB -- "
+            "the /readyz ping path will be uncovered and the "
+            "coverage gate will fail"
+        )
+
+    def test_postgres_server_test_has_notes_round_trip(self, scaffold_target):
+        """The postgres render of server_test.go must include
+        TestNotesPostgresRoundTrip, which exercises the createNote
+        + listNotes success paths end-to-end."""
+        t = _scaffold(scaffold_target, db="postgres")
+        text = (t / "internal" / "demo" / "server_test.go").read_text()
+        assert "TestNotesPostgresRoundTrip" in text, (
+            "postgres server_test.go missing TestNotesPostgresRoundTrip -- "
+            "the /notes handlers will be uncovered and the "
+            "coverage gate will fail"
+        )
+
+    def test_postgres_server_test_has_notes_validation(self, scaffold_target):
+        """The postgres render of server_test.go must include the
+        400-paths for POST /notes (empty body, too long, malformed
+        JSON). These cover the validation branches of createNote
+        that don't need a real DB but aren't hit by the round-trip
+        test."""
+        t = _scaffold(scaffold_target, db="postgres")
+        text = (t / "internal" / "demo" / "server_test.go").read_text()
+        assert "TestNotesPostgresValidation" in text, (
+            "postgres server_test.go missing TestNotesPostgresValidation"
+        )
+
+    def test_postgres_server_test_has_notes_method_not_allowed(self, scaffold_target):
+        """The postgres render must include the 405-path test
+        (PUT/DELETE/PATCH on /notes)."""
+        t = _scaffold(scaffold_target, db="postgres")
+        text = (t / "internal" / "demo" / "server_test.go").read_text()
+        assert "TestNotesPostgresMethodNotAllowed" in text, (
+            "postgres server_test.go missing TestNotesPostgresMethodNotAllowed"
+        )
+
+    def test_postgres_server_test_has_run_migrations(self, scaffold_target):
+        """The postgres render must include TestRunMigrations, which
+        calls RunMigrations against a real DB and asserts the notes
+        table + index are created. Without this, the migration SQL
+        is uncovered."""
+        t = _scaffold(scaffold_target, db="postgres")
+        text = (t / "internal" / "demo" / "server_test.go").read_text()
+        assert "TestRunMigrations" in text, (
+            "postgres server_test.go missing TestRunMigrations"
+        )
+
+    def test_postgres_main_test_has_migrate_subcommand(self, scaffold_target):
+        """The postgres render of main_test.go must include the
+        TestRunMigrate* tests, which exercise the `migrate`
+        subcommand's wiring (DATABASE_URL read, sql.Open,
+        PingContext, RunMigrations call)."""
+        t = _scaffold(scaffold_target, db="postgres")
+        text = (t / "cmd" / "server" / "main_test.go").read_text()
+        assert "TestRunMigrateSuccess" in text, (
+            "postgres main_test.go missing TestRunMigrateSuccess"
+        )
+        assert "TestRunMigrateNoDatabaseURL" in text, (
+            "postgres main_test.go missing TestRunMigrateNoDatabaseURL"
+        )
+        assert "TestRunMigrateBadDSN" in text, (
+            "postgres main_test.go missing TestRunMigrateBadDSN"
+        )
+
+    def test_non_postgres_server_test_omits_db_aware_tests(self, scaffold_target):
+        """The non-postgres render of server_test.go must NOT
+        include the postgres-aware tests (they would dangle --
+        referencing `sql.DB` and `pgx` in a scaffold that doesn't
+        import them). The non-postgres render keeps just the
+        smoke tests (TestHealthz, TestReadyz, TestIndex,
+        TestRoutesExist)."""
+        import re
+        t = _scaffold(scaffold_target, db="mysql")
+        text = (t / "internal" / "demo" / "server_test.go").read_text()
+        # Postgres-only test functions should not appear in the
+        # mysql render. We use a regex anchored on `func <Name>(`
+        # to avoid false positives from comments that mention
+        # the function name in prose.
+        for fn in (
+            "TestReadyzWithDB",
+            "TestNotesPostgresRoundTrip",
+            "TestNotesPostgresValidation",
+            "TestNotesPostgresMethodNotAllowed",
+            "TestRunMigrations",
+        ):
+            pattern = re.compile(rf"\bfunc {re.escape(fn)}\b")
+            assert not pattern.search(text), (
+                f"non-postgres server_test.go should not define {fn} "
+                f"(no pgx / sql.DB in the mysql render)"
+            )
+
+    def test_non_postgres_main_test_omits_migrate_tests(self, scaffold_target):
+        """The non-postgres render of main_test.go must NOT include
+        the migrate-subcommand tests (runMigrate is a no-op stub
+        on the non-postgres path and the tests would not run)."""
+        t = _scaffold(scaffold_target, db="mysql")
+        text = (t / "cmd" / "server" / "main_test.go").read_text()
+        for fn in (
+            "TestRunMigrateSuccess",
+            "TestRunMigrateNoDatabaseURL",
+            "TestRunMigrateBadDSN",
+        ):
+            assert fn not in text, (
+                f"non-postgres main_test.go should not contain {fn}"
+            )

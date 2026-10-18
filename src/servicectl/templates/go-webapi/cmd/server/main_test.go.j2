@@ -19,6 +19,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+{% if db == "postgres" %}
+	"fmt"
+{% endif %}
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -266,6 +269,86 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
+
+{% if db == "postgres" %}
+//
+// --- migrate subcommand tests (--db=postgres only) -----------------------
+//
+// The `migrate` subcommand opens a *sql.DB against $DATABASE_URL, pings,
+// and calls internal/<svc>.RunMigrations. These tests cover the
+// subcommand's wiring: the DATABASE_URL read, the sql.Open, the
+// PingContext, and the RunMigrations call. The actual migration SQL
+// is covered by TestRunMigrations in internal/<svc>/server_test.go.
+//
+
+// postgresDSN builds the same connection string runMigrate would
+// build from $DATABASE_URL, but constructed from the POSTGRES_*
+// env vars that the CI workflow's services: postgres: block sets.
+// This lets us point runMigrate at the CI's postgres without
+// requiring the test runner to know the DSN format.
+func postgresDSN(t *testing.T) string {
+	t.Helper()
+	if os.Getenv("POSTGRES_HOST") == "" {
+		t.Skip("POSTGRES_HOST not set; skipping migrate-subcommand test")
+	}
+	return fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		os.Getenv("POSTGRES_HOST"),
+		getenvDefault("POSTGRES_PORT", "5432"),
+		os.Getenv("POSTGRES_USER"),
+		os.Getenv("POSTGRES_PASSWORD"),
+		os.Getenv("POSTGRES_DB"),
+	)
+}
+
+// getenvDefault is a tiny helper mirroring the same function in
+// internal/<svc>/server_test.go. Duplicated here to avoid an import
+// cycle (server_test.go imports "main" only via the build, not at
+// runtime, so we can't share a helpers package without an
+// awkward third package).
+func getenvDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// TestRunMigrateSuccess verifies the migrate subcommand's happy
+// path: with $DATABASE_URL set to a reachable postgres, runMigrate
+// returns nil and the notes table is created. This is the
+// end-to-end test for the deploy workflow's
+// `kubectl exec deploy/<name> -- /app/<name> migrate` step.
+func TestRunMigrateSuccess(t *testing.T) {
+	t.Setenv("DATABASE_URL", postgresDSN(t))
+	if err := runMigrate(); err != nil {
+		t.Fatalf("runMigrate: %v", err)
+	}
+}
+
+// TestRunMigrateNoDatabaseURL verifies runMigrate returns an
+// error when $DATABASE_URL is unset, without crashing.
+func TestRunMigrateNoDatabaseURL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	err := runMigrate()
+	if err == nil {
+		t.Fatal("expected error from runMigrate with empty DATABASE_URL, got nil")
+	}
+	if !strings.Contains(err.Error(), "DATABASE_URL") {
+		t.Errorf("expected error to mention DATABASE_URL, got: %v", err)
+	}
+}
+
+// TestRunMigrateBadDSN verifies runMigrate returns an error
+// when $DATABASE_URL points at an unreachable host. Exercises
+// the sql.Open + PingContext failure paths.
+func TestRunMigrateBadDSN(t *testing.T) {
+	t.Setenv("DATABASE_URL", "host=nonexistent.invalid port=5432 user=postgres password=postgres dbname=postgres sslmode=disable")
+	err := runMigrate()
+	if err == nil {
+		t.Fatal("expected error from runMigrate with bad DSN, got nil")
+	}
+}
+{% endif %}
 
 // sentinel unused-import guard. Keeps `errors` referenced in case a
 // future test asserts on ListenAndServe's error path.

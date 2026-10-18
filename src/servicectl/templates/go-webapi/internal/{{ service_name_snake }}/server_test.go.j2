@@ -1,10 +1,25 @@
 package {{ service_name_snake }}
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+{% if db == 'postgres' %}
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib" // pgx database/sql driver
+{% else %}
 	"net/http"
 	"net/http/httptest"
 	"testing"
+{% endif %}
 )
 
 // TestHealthz asserts /healthz returns 200 with the expected body.
@@ -31,6 +46,9 @@ func TestHealthz(t *testing.T) {
 }
 
 // TestReadyz asserts /readyz returns 200 with the expected body.
+// On the no-DB scaffold (--db != postgres) the handler is a no-op
+// 200; on the postgres scaffold we add a DB-aware variant in
+// TestReadyzWithDB below that covers the ping path.
 func TestReadyz(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
@@ -78,6 +96,9 @@ func TestRoutesExist(t *testing.T) {
 		{http.MethodGet, "/healthz"},
 		{http.MethodGet, "/readyz"},
 		{http.MethodGet, "/"},
+{% if db == "postgres" %}
+		{http.MethodGet, "/notes"},
+{% endif %}
 	}
 
 	for _, r := range routes {
@@ -85,10 +106,356 @@ func TestRoutesExist(t *testing.T) {
 		req := httptest.NewRequest(r.method, r.path, nil)
 		mux.ServeHTTP(rec, req)
 
-		// All routes should at least return 200 on a basic GET — we're
-		// not testing business logic here, only that the mux is wired up.
+		// /notes with no DB returns 503; for the table-driven check
+		// we accept either 200 (no-DB routes) or 503 (/notes with
+		// no DB). The real assertion for /notes is in
+		// TestNotesPostgresNoDB below.
+{% if db == "postgres" %}
+		if r.path == "/notes" && rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("route %s %s: expected 503 (no DB), got %d", r.method, r.path, rec.Code)
+			continue
+		}
+{% endif %}
 		if rec.Code != http.StatusOK {
 			t.Errorf("route %s %s: expected 200, got %d", r.method, r.path, rec.Code)
 		}
 	}
 }
+{% if db == "postgres" %}
+
+//
+// --- postgres-path tests (--db=postgres only) ----------------------------
+//
+// These tests cover the *sql.DB code paths in server.go.j2. They require
+// a real postgres database; the CI workflow (ci.yml.j2) provisions one
+// via a `services: postgres:` block with the POSTGRES_* env vars set.
+// If POSTGRES_HOST is unset (e.g. running the tests locally without
+// docker), the tests are skipped -- not failed -- so the test suite
+// remains runnable in any environment.
+//
+
+// openTestDB returns a *sql.DB connected to the test postgres instance,
+// or skips the test if POSTGRES_HOST is unset. The connection is closed
+// automatically via t.Cleanup.
+func openTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	if os.Getenv("POSTGRES_HOST") == "" {
+		t.Skip("POSTGRES_HOST not set; skipping postgres-dependent test")
+	}
+	dsn := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		os.Getenv("POSTGRES_HOST"),
+		getenv("POSTGRES_PORT", "5432"),
+		os.Getenv("POSTGRES_USER"),
+		os.Getenv("POSTGRES_PASSWORD"),
+		os.Getenv("POSTGRES_DB"),
+	)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	// Confirm the DB is actually reachable. sql.Open is lazy.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		t.Fatalf("ping test postgres: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// getenv is os.Getenv with a default. Tiny helper to avoid the
+// `if x == "" { x = "5432" }` boilerplate at every call site.
+func getenv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// uniqueBody returns a body string that's unique per call, so tests
+// that POST notes don't collide on the shared test database. The
+// prefix lets the test filter the GET /notes response to just the
+// notes it created.
+func uniqueBody(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+}
+
+// lastNoteWithBody fetches the most recent notes via GET /notes and
+// returns the first one whose body has the given prefix. Returns
+// (nil, false) if no match. Used by round-trip tests to assert
+// "the note I just POSTed shows up in the list".
+func lastNoteWithBody(t *testing.T, srv *Server, prefix string) (*Note, bool) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/notes", nil)
+	srv.Mux().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /notes: expected 200, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	var notes []Note
+	if err := json.NewDecoder(rec.Body).Decode(&notes); err != nil {
+		t.Fatalf("decode notes: %v", err)
+	}
+	for i := range notes {
+		if strings.HasPrefix(notes[i].Body, prefix) {
+			return &notes[i], true
+		}
+	}
+	return nil, false
+}
+
+// TestReadyzWithDB verifies /readyz returns 200 when the configured DB
+// is reachable. Companion to TestReadyz (which tests the no-DB path).
+func TestReadyzWithDB(t *testing.T) {
+	db := openTestDB(t)
+	srv := NewServer(db)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	srv.Mux().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with reachable DB, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["status"] != "ready" {
+		t.Fatalf("expected status=ready, got %q", body["status"])
+	}
+}
+
+// TestReadyzWithClosedDB verifies /readyz returns 503 when the
+// configured DB has been closed. Exercises the ping-failure path.
+func TestReadyzWithClosedDB(t *testing.T) {
+	db := openTestDB(t)
+	db.Close() // force ping to fail
+	srv := NewServer(db)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	srv.Mux().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 with closed DB, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["status"] != "not_ready" {
+		t.Fatalf("expected status=not_ready, got %q", body["status"])
+	}
+	if body["reason"] != "db_ping_failed" {
+		t.Fatalf("expected reason=db_ping_failed, got %q", body["reason"])
+	}
+}
+
+// TestNotesPostgresNoDB verifies the defensive 503 path on /notes
+// when no DB is configured. The mux registers /notes only for the
+// postgres render, so we hit it via NewServer(nil).Mux().
+func TestNotesPostgresNoDB(t *testing.T) {
+	srv := NewServer(nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/notes", nil)
+	srv.Mux().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 with no DB, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestNotesPostgresRoundTrip POSTs a unique note and asserts it shows
+// up in GET /notes. Covers the createNote + listNotes success paths
+// end-to-end.
+func TestNotesPostgresRoundTrip(t *testing.T) {
+	db := openTestDB(t)
+	srv := NewServer(db)
+
+	prefix := fmt.Sprintf("roundtrip-%d", time.Now().UnixNano())
+	body := uniqueBody(prefix)
+
+	// POST /notes
+	postRec := httptest.NewRecorder()
+	postReq := httptest.NewRequest(http.MethodPost, "/notes",
+		strings.NewReader(fmt.Sprintf(`{"body":%q}`, body)))
+	srv.Mux().ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusCreated {
+		t.Fatalf("POST /notes: expected 201, got %d (body=%s)", postRec.Code, postRec.Body.String())
+	}
+	var created Note
+	if err := json.NewDecoder(postRec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created note: %v", err)
+	}
+	if created.Body != body {
+		t.Fatalf("expected created.Body=%q, got %q", body, created.Body)
+	}
+	if created.ID == 0 {
+		t.Fatal("expected non-zero ID on created note")
+	}
+
+	// GET /notes -- assert our note is in the list
+	got, ok := lastNoteWithBody(t, srv, prefix)
+	if !ok {
+		t.Fatalf("POSTed note with prefix %q not found in GET /notes", prefix)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("expected ID=%d, got %d", created.ID, got.ID)
+	}
+	if got.Body != body {
+		t.Fatalf("expected Body=%q, got %q", body, got.Body)
+	}
+}
+
+// TestNotesPostgresValidation exercises the 400-paths on POST /notes:
+// empty body, body too long, malformed JSON. The validation happens
+// before any SQL, so we don't need a real DB for the early-return
+// cases, but using NewServer(db) makes the test honest about the
+// real call shape.
+func TestNotesPostgresValidation(t *testing.T) {
+	db := openTestDB(t)
+	srv := NewServer(db)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty body", `{"body":""}`},
+		{"body too long", fmt.Sprintf(`{"body":%q}`, strings.Repeat("x", 1025))},
+		{"malformed JSON", `{"body": this is not json}`},
+		{"missing body field", `{}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/notes", strings.NewReader(tc.body))
+			srv.Mux().ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("expected 400 for %q, got %d (body=%s)", tc.name, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestNotesPostgresMethodNotAllowed exercises the 405-path on /notes.
+// PUT, DELETE, and PATCH on /notes all return 405 with an Allow header
+// of "GET, POST".
+func TestNotesPostgresMethodNotAllowed(t *testing.T) {
+	db := openTestDB(t)
+	srv := NewServer(db)
+
+	for _, method := range []string{http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		t.Run(method, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(method, "/notes", nil)
+			srv.Mux().ServeHTTP(rec, req)
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Errorf("expected 405 for %s, got %d", method, rec.Code)
+			}
+			if got := rec.Header().Get("Allow"); got != "GET, POST" {
+				t.Errorf("expected Allow=%q, got %q", "GET, POST", got)
+			}
+		})
+	}
+}
+
+// TestCreateNotePostgresDBError verifies createNote returns 500
+// when the DB is closed. Exercises the SQL-error path in createNote.
+func TestCreateNotePostgresDBError(t *testing.T) {
+	db := openTestDB(t)
+	srv := NewServer(db)
+	db.Close() // force INSERT to fail
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/notes",
+		strings.NewReader(`{"body":"will-fail-because-db-closed"}`))
+	srv.Mux().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 with closed DB, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestListNotesPostgresDBError verifies listNotes returns 503 when
+// the DB is closed. Exercises the SQL-error path in listNotes.
+func TestListNotesPostgresDBError(t *testing.T) {
+	db := openTestDB(t)
+	srv := NewServer(db)
+	db.Close() // force SELECT to fail
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/notes", nil)
+	srv.Mux().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 with closed DB, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRunMigrations verifies RunMigrations creates the notes table
+// and is idempotent (re-running is a no-op). This is the test
+// counterpart to the `migrate` subcommand in cmd/server.
+func TestRunMigrations(t *testing.T) {
+	db := openTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// First run: should create the table. If a previous test run
+	// already created it, IF NOT EXISTS makes this a no-op.
+	if err := RunMigrations(ctx, db); err != nil {
+		t.Fatalf("first RunMigrations: %v", err)
+	}
+
+	// Verify the table exists by querying pg_tables.
+	var exists bool
+	row := db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'notes')`)
+	if err := row.Scan(&exists); err != nil {
+		t.Fatalf("query pg_tables: %v", err)
+	}
+	if !exists {
+		t.Fatal("expected `notes` table to exist after RunMigrations")
+	}
+
+	// Second run: must be a no-op (idempotent).
+	if err := RunMigrations(ctx, db); err != nil {
+		t.Fatalf("second RunMigrations (idempotent): %v", err)
+	}
+
+	// Third sanity: the index from migration001Notes should also exist.
+	var indexExists bool
+	row = db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes
+		 WHERE indexname = 'notes_created_at_idx')`)
+	if err := row.Scan(&indexExists); err != nil {
+		t.Fatalf("query pg_indexes: %v", err)
+	}
+	if !indexExists {
+		t.Fatal("expected `notes_created_at_idx` index to exist after RunMigrations")
+	}
+}
+
+// TestRunMigrationsBadDB verifies RunMigrations returns a non-nil
+// error when the DB is closed. Exercises the error path that
+// main.go's runMigrate surfaces via log.Fatalf.
+func TestRunMigrationsBadDB(t *testing.T) {
+	db := openTestDB(t)
+	db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := RunMigrations(ctx, db)
+	if err == nil {
+		t.Fatal("expected error from RunMigrations with closed DB, got nil")
+	}
+	// Sanity: the error should reference the file name so the user
+	// can find the failing migration.
+	if !strings.Contains(err.Error(), "001_notes.sql") {
+		t.Errorf("expected error to mention 001_notes.sql, got: %v", err)
+	}
+}
+
+// _ = errors.New keeps the import used in TestRunMigrationsBadDB's
+// callers (the runMigrate path in main.go uses errors.New directly;
+// the import is here for forward-compat if a test needs it).
+var _ = errors.New
+{% endif %}
