@@ -1,0 +1,31 @@
+{% if db == 'postgres' %}-- {{ service_name }} — initial schema.
+--
+-- This migration is part of the servicectl go-webapi scaffold with
+-- --db=postgres. The deploy workflow applies all files under
+-- migrations/ in lexicographic order on every push, so this file
+-- is the schema as-of the first deploy. Add new files as
+-- migrations/NNN_description.sql for subsequent changes.
+--
+-- Why a `notes` table: it's the smallest useful thing that
+-- exercises the full postgres path. The /notes endpoints (POST
+-- and GET) read and write this table, and the smoke test
+-- POSTs a row and GETs it back to prove the entire stack
+-- (app -> cloudsql-proxy -> Cloud SQL) is wired up.
+--
+-- Idempotency: `CREATE TABLE IF NOT EXISTS` makes this safe
+-- to run on every deploy. If you need data migrations later,
+-- wrap them in `DO $$ BEGIN ... EXCEPTION WHEN ...` blocks
+-- or check `information_schema` for the row's existence.
+
+CREATE TABLE IF NOT EXISTS notes (
+    id          BIGSERIAL PRIMARY KEY,
+    body        TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- An index on created_at DESC supports the default /notes list
+-- ordering ("newest first, limit 10"). Without it, the table
+-- would seq-scan for every GET.
+CREATE INDEX IF NOT EXISTS notes_created_at_idx
+    ON notes (created_at DESC);
+{% endif %}

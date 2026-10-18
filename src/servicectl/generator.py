@@ -274,7 +274,12 @@ class ServiceGenerator:
             rendered_part = env.from_string(part).render(**ctx)
             dest_parts.append(rendered_part)
         new_dest = dest.joinpath(*dest_parts) if dest_parts else dest
-        new_dest.mkdir(parents=True, exist_ok=True)
+        # Note: `new_dest.mkdir(parents=True, exist_ok=True)` is deferred
+        # until *after* we know the file is going to be written. The
+        # body-wrap conditional pattern (e.g. `{% if db == 'postgres' %}`)
+        # can render to an empty file, in which case we don't want to
+        # leave an empty parent directory behind. See the empty-render
+        # skip below.
 
         if src.name.endswith(".j2"):
             tmpl_stem = src.name[: -len(".j2")]
@@ -295,10 +300,12 @@ class ServiceGenerator:
             # would point at a 2-byte file that kustomize can't parse.
             if not rendered.strip():
                 return
+            new_dest.mkdir(parents=True, exist_ok=True)
             dest_path.write_text(rendered, encoding="utf-8")
         else:
             # Static file, but its name might still contain Jinja placeholders.
             dest_name = env.from_string(src.name).render(**ctx)
+            new_dest.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, new_dest / dest_name)
 
     def run(self, console=None) -> Path:
