@@ -135,23 +135,63 @@ etc. get substituted. PRs welcome.
 
 - **`local`** (default) — Docker Compose, no cloud account required
 - **`azure`** — Azure App Service (Linux, container), Bicep + bicepparam, OIDC-based CD
-- `aws` — *coming next: CDK or Terraform for App Runner / ECS Fargate*
-- `gcp` — *coming next: Cloud Run*
+- `gcp-cloud-run` — Google Cloud Run, fully managed, scales to zero
+- `gcp-gke-autopilot` — GKE Autopilot (managed Kubernetes), WIF + GCE Ingress, with optional `--db=postgres` for managed Cloud SQL via cloudsql-proxy sidecar
+
+For a walkthrough of the GKE + postgres path (one-time setup,
+end-to-end deploy, teardown, cost expectations), see
+[`docs/gke-postgres-setup.md`](docs/gke-postgres-setup.md) and
+[`docs/deploy-gke.md`](docs/deploy-gke.md). The architecture
+rationale (VPC peering, Workload Identity, secret sync, nip.io
+hostnames) is in
+[`docs/architecture.md#postgres-on-gke`](docs/architecture.md#postgres-on-gke-autopilot).
+
+## What a GKE + postgres scaffold emits
+
+```
+demo/
+├── main.go                            # Go HTTP service (:8080, /healthz, /readyz)
+├── Dockerfile                         # multi-stage build
+├── .github/workflows/ci.yml           # test + build on PR
+├── deploy.yml                         # deploy on push to main
+└── infra/                             # Terraform root
+    ├── main.tf.j2                     # wires gke_autopilot + cloudsql modules
+    ├── variables.tf.j2                # project_id, region, image, db_tier, db_name, db_user
+    ├── outputs.tf.j2                  # cluster_name, db_connection_name, db_password_secret_id, ...
+    ├── {dev,staging,prod}.tfvars.j2   # per-env overrides
+    ├── bootstrap.sh.j2                # one-time WIF + CI SA setup
+    └── modules/
+        ├── gke_autopilot/             # cluster (VPC, subnetwork, secondary ranges)
+        └── cloudsql/                  # postgres 16 (private IP, random password, Secret Manager)
+└── k8s/                               # kustomize manifests
+    ├── base/                          # Deployment, Service, ServiceAccount, Ingress, ...
+    │                                  # cloudsql-proxy.yaml + secret.yaml when --db=postgres
+    └── overlays/
+        ├── dev/                       # replicas=1, nip.io host
+        └── prod/                      # replicas=2, PDB, real-domain placeholder
+```
+
+`deploy.yml` does the deploy on push to main: WIF auth, docker
+build, GAR push, `terraform apply`, k8s Secret sync from Secret
+Manager, `kubectl apply -k`, GCE LB IP fetch + overlay patch,
+smoke test (`/healthz` hard gate, `/readyz` soft warning).
 
 ---
 
 ## Database backends
 
-The `--db` flag controls both the local dev docker-compose image and the
-Azure deploy's database resource type. Default is `postgres` (preserves
-existing behavior; no breaking change for current users).
+The `--db` flag controls the local dev docker-compose image, the
+GCP overlay's `cloudsql` Terraform module (postgres), and the
+Azure deploy's database resource type. Default is `postgres`
+(preserves existing behavior; no breaking change for current
+users).
 
-| `--db` | Local dev image | Azure resource |
-|---|---|---|
-| `postgres` (default) | `postgres:16-alpine` | Microsoft.DBforPostgreSQL/flexibleServers |
-| `mysql` | `mysql:8.0` | Microsoft.DBforMySQL/flexibleServers |
-| `mssql` | `mcr.microsoft.com/azure-sql-edge:latest` | Microsoft.Sql/servers + databases |
-| `cosmosdb` | `mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest` | Microsoft.DocumentDB/databaseAccounts |
+| `--db` | Local dev image | GCP resource | Azure resource |
+|---|---|---|---|
+| `postgres` (default) | `postgres:16-alpine` | `google_sql_database_instance` (postgres 16, private IP only) + cloudsql-proxy sidecar | Microsoft.DBforPostgreSQL/flexibleServers |
+| `mysql` | `mysql:8.0` | *no managed resource; k8s/ tree omits the cloudsql-proxy* | Microsoft.DBforMySQL/flexibleServers |
+| `mssql` | `mcr.microsoft.com/azure-sql-edge:latest` | *no managed resource; k8s/ tree omits the cloudsql-proxy* | Microsoft.Sql/servers + databases |
+| `cosmosdb` | `mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest` | *no managed resource; k8s/ tree omits the cloudsql-proxy* | Microsoft.DocumentDB/databaseAccounts |
 
 **Local dev notes:**
 - The Postgres, MySQL, and MSSQL flavors are lightweight (~50MB images).
