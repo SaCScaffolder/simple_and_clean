@@ -1,0 +1,23 @@
+# {{ service_name }} — base Service.
+#
+# ClusterIP. The Ingress in ingress.yaml.j2 routes external HTTPS
+# traffic to this Service's port 80 -> pod port 8080. ClusterIP
+# keeps the app unreachable from the public internet directly;
+# only the GCE ingress (and the cloudsql-proxy sidecar's localhost
+# listener) can reach it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ service_name }}
+  labels:
+    app: {{ service_name }}
+    managed_by: servicectl
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ service_name }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

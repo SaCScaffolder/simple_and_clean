@@ -176,9 +176,45 @@ class ServiceGenerator:
             "db_docker_image": db_meta["docker_image"],
             "db_env_prefix": db_meta["env_prefix"],
             "db_healthcheck_cmd": db_meta["healthcheck_cmd"],
-            "image_name": self._render_image_name(),
-            "registry_hostname": self._registry_hostname(),
-        }
+    # GCP service accounts must be 6-30 chars, lowercase letters,
+    # digits, and dashes. They cannot start with a digit and cannot
+    # end with a dash. The convention `<service-name>-runtime` is
+    # the one the gcp/infra overlay uses for the runtime SA; we
+    # build the same name here so the k8s ServiceAccount annotation
+    # (which references the GCP SA by email) lines up with what
+    # `google_service_account.runtime.email` resolves to in main.tf.j2.
+    "gcp_runtime_sa_email": (
+        f"{self.name.replace('_', '-')}-runtime@"
+        f"{(self.gcp_project_id or 'REPLACE_WITH_GCP_PROJECT_ID')}.iam.gserviceaccount.com"
+    ),
+    # Default nip.io hostname for the dev overlay's Ingress. The
+    # real ingress IP is patched in by deploy.yml (PR 3) after the
+    # GCE load balancer is created; until then, the placeholder
+    # 35.35.35.35 makes the manifest valid but the cert won't issue
+    # (the ManagedCertificate only issues once the hostname's DNS
+    # resolves to the LB). For prod, the overlay is expected to be
+    # edited to use a real domain before `kubectl apply`.
+    "gke_ingress_ip": "35.35.35.35",
+    # The connection name for the cloudsql-proxy sidecar. Format
+    # `<project>:<region>:<instance>`, matching the Terraform output
+    # `db_connection_name` from PR 1. The instance name is the
+    # service-name + environment, identical to the cloudsql module's
+    # `google_sql_database_instance.main.name`.
+    "db_connection_name": (
+        f"{(self.gcp_project_id or 'REPLACE_WITH_GCP_PROJECT_ID')}:"
+        f"{self.gcp_region}:"
+        f"{self.name.replace('_', '-')}-dev"
+    ),
+    # The hostname the Ingress routes to. Dev uses nip.io (free
+    # wildcard DNS) keyed off the placeholder ingress IP; prod is
+    # left for the user to fill in via the overlay (the placeholder
+    # `<service>.example.com` will not issue a cert).
+    "service_hostname": (
+        f"{self.name}.35.35.35.35.nip.io"
+    ),
+    "image_name": self._render_image_name(),
+    "registry_hostname": self._registry_hostname(),
+}
 
     def _render_image_name(self) -> str:
         """Build the full image reference (hostname + path) for self.registry.
@@ -249,6 +285,16 @@ class ServiceGenerator:
             tmpl_rel = str(rel).replace("\\", "/")
             tmpl = env.get_template(tmpl_rel)
             rendered = tmpl.render(**ctx)
+            # If the rendered body is empty (or only whitespace), treat
+            # the file as conditionally-skipped and don't write it.
+            # This is what enables the `{% if gcp_postgres_enabled %}…
+            # {% endif %}` body-wrap pattern: the file's whole body is
+            # inside the conditional, so when the condition is false the
+            # render is just a newline (or empty). Without this skip,
+            # the kustomization.yaml's `resources: - secret.yaml` entry
+            # would point at a 2-byte file that kustomize can't parse.
+            if not rendered.strip():
+                return
             dest_path.write_text(rendered, encoding="utf-8")
         else:
             # Static file, but its name might still contain Jinja placeholders.
@@ -315,15 +361,40 @@ class ServiceGenerator:
                     undefined=StrictUndefined,
                     keep_trailing_newline=True,
                 )
-                for src in sorted(overlay_root.rglob("*")):
-                    if src.is_dir() or src.name in _IGNORED_NAMES:
-                        continue
-                    rel = src.relative_to(overlay_root)
-                    self._render_file(rel, src, target, overlay_env, ctx)
-                    if src.name.endswith(".j2"):
-                        rendered_count += 1
-                    else:
-                        copied_count += 1
+                # The k8s/ subdirectory of the GCP overlay is only valid
+                # for gcp-gke-autopilot. Skip it for gcp-cloud-run, which
+                # has its own deployment story. This is the one place
+                # the overlay walker's flat rglob needs a per-deploy-target
+                # filter; everything else in deploy/gcp/ is shared between
+                # both flavors.
+                deploy_root = overlay_root
+                if overlay_subdir == "gcp" and self.deploy_target != "gcp-gke-autopilot":
+                    # The k8s/ tree is gated to gcp-gke-autopilot; build
+                    # a temporary filtered tree of files to walk.
+                    # We can't mutate overlay_root in place, so we walk
+                    # the rglob ourselves and skip paths that contain
+                    # a k8s/ segment when the deploy target isn't gke.
+                    for src in sorted(overlay_root.rglob("*")):
+                        if src.is_dir() or src.name in _IGNORED_NAMES:
+                            continue
+                        if "k8s" in src.relative_to(overlay_root).parts:
+                            continue
+                        rel = src.relative_to(overlay_root)
+                        self._render_file(rel, src, target, overlay_env, ctx)
+                        if src.name.endswith(".j2"):
+                            rendered_count += 1
+                        else:
+                            copied_count += 1
+                else:
+                    for src in sorted(overlay_root.rglob("*")):
+                        if src.is_dir() or src.name in _IGNORED_NAMES:
+                            continue
+                        rel = src.relative_to(overlay_root)
+                        self._render_file(rel, src, target, overlay_env, ctx)
+                        if src.name.endswith(".j2"):
+                            rendered_count += 1
+                        else:
+                            copied_count += 1
 
         if console is not None:
             console.print(f"  rendered [bold]{rendered_count}[/bold] templated files")
