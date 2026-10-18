@@ -108,6 +108,30 @@ jobs:
           gcloud container clusters get-credentials "${CLUSTER_NAME}" \
               --region "${REGION}" --project "${PROJECT}"
 
+{% if gcp_postgres_enabled %}
+      - name: Sync db-credentials Secret from Secret Manager
+        if: {% raw %}${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}{% endraw %}
+        # The cloudsql module (PR 1) provisions a `random_password` and
+        # writes it to Secret Manager. The `db-credentials` k8s Secret is
+        # the bridge between Secret Manager and the pod's envFrom; we
+        # re-create it on every deploy so a rotated password takes effect
+        # on the next push. The placeholder k8s/base/secret.yaml.j2 file
+        # (PR 2) is the schema; this step overwrites its stringData.
+        run: |
+          set -euo pipefail
+          SECRET_ID="$(terraform -chdir=infra output -raw db_password_secret_id)"
+          DB_NAME="$(terraform -chdir=infra output -raw db_name)"
+          DB_USER="$(terraform -chdir=infra output -raw db_user)"
+          PASSWORD="$(gcloud secrets versions access latest --secret="${SECRET_ID}" \
+              --project="{% raw %}${{ secrets.GCP_PROJECT_ID }}{% endraw %}")"
+          kubectl create secret generic db-credentials \
+              --from-literal=DB_USER="${DB_USER}" \
+              --from-literal=DB_PASSWORD="${PASSWORD}" \
+              --from-literal=DB_NAME="${DB_NAME}" \
+              --dry-run=client -o yaml | kubectl apply -f -
+          echo "db-credentials Secret synced from Secret Manager secret ${SECRET_ID}"
+{% endif %}
+
       - name: kustomize-apply manifests
         if: {% raw %}${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}{% endraw %}
         run: |
@@ -117,7 +141,60 @@ jobs:
           cd "k8s/overlays/${ENV}"
           kustomize edit set image \
               {{ service_name }}=${{ '{{' }} env.IMAGE {{ '}}' }}
+{% if gcp_postgres_enabled %}
+          # Same injection for the cloudsql-proxy sidecar. The base
+          # kustomization references both <service> and
+          # <service>-cloudsql-proxy in its images block, so
+          # `kustomize edit set image` only patches the app container.
+          # We do the proxy explicitly so its image tag is in lockstep
+          # with the app. The proxy image is the same GAR repo with a
+          # `-cloudsql-proxy` tag suffix; the proxy Deployment points
+          # at gcr.io/cloud-sql-connectors/cloud-sql-proxy:2 by default
+          # (see k8s/base/cloudsql-proxy.yaml.j2), so the edit fails
+          # silently if the image isn't named the same way.
+          kustomize edit set image \
+              {{ service_name }}-cloudsql-proxy=${{ '{{' }} env.IMAGE {{ '}}' }}-cloudsql-proxy || true
+{% endif %}
           kubectl apply -k .
+
+      - name: Wait for ingress IP and patch overlay with real hostname
+        if: {% raw %}${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}{% endraw %}
+        # The GCE Ingress is created on the first `kubectl apply` with
+        # the scaffolded placeholder host (`<service>.35.35.35.35.nip.io`).
+        # The GCE load balancer takes ~30-90s to provision; once it
+        # does, `kubectl get ingress` reports its IP. We patch the
+        # overlay's kustomization.yaml to swap the placeholder for the
+        # real IP and re-apply. The ManagedCertificate will then issue
+        # for the real nip.io hostname.
+        #
+        # Why sed and not `kustomize edit set hostname`: `kustomize edit`
+        # doesn't have a hostname operation, and the host lives inside a
+        # JSON6902 patch in overlays/dev/kustomization.yaml. The
+        # placeholder `35.35.35.35` is a known constant from the dev
+        # overlay's template (service_hostname default), so a single sed
+        # substitution is reliable.
+        run: |
+          set -euo pipefail
+          ENV="{{ '{{' }} inputs.environment || 'dev' {{ '}}' }}"
+          INGRESS_NAME="dev-{{ service_name }}"
+          IP=""
+          for i in {1..60}; do
+            IP="$(kubectl get ingress "${INGRESS_NAME}" \
+                -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+            if [ -n "${IP}" ] && [ "${IP}" != "null" ]; then
+              echo "Ingress IP is ${IP} (after ${i} attempts)"
+              break
+            fi
+            sleep 5
+          done
+          if [ -z "${IP}" ] || [ "${IP}" = "null" ]; then
+            echo "GCE load balancer did not provision an IP within 5 minutes" >&2
+            echo "Falling back to placeholder host; ManagedCertificate will not issue" >&2
+            exit 0
+          fi
+          sed -i "s/35\.35\.35\.35/${IP}/g" "k8s/overlays/${ENV}/kustomization.yaml"
+          kubectl apply -k "k8s/overlays/${ENV}"
+          echo "Overlay patched with real ingress IP ${IP}"
 {% endif %}
 
       - name: Smoke test
@@ -150,6 +227,27 @@ jobs:
           for i in {1..30}; do
             if curl -sf "https://${URL}/healthz" >/dev/null; then
               echo "Health check passed after ${i} attempts"
+{% if gcp_postgres_enabled %}
+              # /readyz returns 200 only when the dependency checks pass
+              # (including the DB ping through the cloudsql-proxy). It
+              # can take a few extra seconds after /healthz to come up
+              # because the proxy has to negotiate a TLS cert with the
+              # Cloud SQL Admin API. We poll /readyz for up to 2 minutes;
+              # a failure here is a soft warning, not a deploy failure,
+              # because the pod is up and serving traffic either way.
+              READYZ_OK=false
+              for j in {1..12}; do
+                if curl -sf "https://${URL}/readyz" >/dev/null; then
+                  echo "Readyz check passed after ${j} attempts (DB reachable)"
+                  READYZ_OK=true
+                  break
+                fi
+                sleep 10
+              done
+              if [ "${READYZ_OK}" = "false" ]; then
+                echo "::warning::Readyz did not return 200 within 2 minutes; the DB may not be reachable from the cloudsql-proxy. The deploy itself succeeded; investigate the proxy and the Workload Identity binding." >&2
+              fi
+{% endif %}
               exit 0
             fi
             sleep 10
