@@ -96,9 +96,13 @@ func TestRoutesExist(t *testing.T) {
 		{http.MethodGet, "/healthz"},
 		{http.MethodGet, "/readyz"},
 		{http.MethodGet, "/"},
-{% if db == "postgres" %}
-		{http.MethodGet, "/notes"},
-{% endif %}
+		// /notes is intentionally NOT in this table:
+		//   - NewServer(nil) returns 503 for /notes (the defensive
+		//     "no DB configured" path is part of the postgres
+		//     code path's contract and is covered by
+		//     TestNotesPostgresNoDB).
+		//   - With a real DB, /notes is covered by
+		//     TestNotesPostgresRoundTrip.
 	}
 
 	for _, r := range routes {
@@ -106,16 +110,6 @@ func TestRoutesExist(t *testing.T) {
 		req := httptest.NewRequest(r.method, r.path, nil)
 		mux.ServeHTTP(rec, req)
 
-		// /notes with no DB returns 503; for the table-driven check
-		// we accept either 200 (no-DB routes) or 503 (/notes with
-		// no DB). The real assertion for /notes is in
-		// TestNotesPostgresNoDB below.
-{% if db == "postgres" %}
-		if r.path == "/notes" && rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("route %s %s: expected 503 (no DB), got %d", r.method, r.path, rec.Code)
-			continue
-		}
-{% endif %}
 		if rec.Code != http.StatusOK {
 			t.Errorf("route %s %s: expected 200, got %d", r.method, r.path, rec.Code)
 		}
@@ -133,6 +127,48 @@ func TestRoutesExist(t *testing.T) {
 // docker), the tests are skipped -- not failed -- so the test suite
 // remains runnable in any environment.
 //
+// Setup: TestMain (below) calls RunMigrations once before any test
+// runs, so the schema is guaranteed to exist by the time these
+// tests touch the DB. The tests use unique bodies per call so they
+// don't collide on the shared test database.
+//
+
+// TestMain runs once before any tests in this package. It calls
+// RunMigrations to ensure the schema is in place, then runs the
+// tests. Without this, TestNotesPostgresRoundTrip (which runs
+// before TestRunMigrations alphabetically) would INSERT into a
+// table that doesn't exist yet.
+func TestMain(m *testing.M) {
+	if os.Getenv("POSTGRES_HOST") != "" {
+		// One-shot DB to run the migration.
+		dsn := fmt.Sprintf(
+			"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+			os.Getenv("POSTGRES_HOST"),
+			getenv("POSTGRES_PORT", "5432"),
+			os.Getenv("POSTGRES_USER"),
+			os.Getenv("POSTGRES_PASSWORD"),
+			os.Getenv("POSTGRES_DB"),
+		)
+		db, err := sql.Open("pgx", dsn)
+		if err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := db.PingContext(ctx); err == nil {
+				// Best-effort migration. If the table already
+				// exists from a prior run, IF NOT EXISTS makes
+				// this a no-op for the table itself; the
+				// underlying sequence + type may already exist
+				// (BIGSERIAL creates them), but CREATE TABLE
+				// IF NOT EXISTS is a no-op when the table
+				// exists, so the type/sequence aren't touched.
+				// If the table doesn't exist, this creates it.
+				_ = RunMigrations(ctx, db)
+			}
+			cancel()
+			db.Close()
+		}
+	}
+	os.Exit(m.Run())
+}
 
 // openTestDB returns a *sql.DB connected to the test postgres instance,
 // or skips the test if POSTGRES_HOST is unset. The connection is closed
@@ -269,7 +305,10 @@ func TestNotesPostgresNoDB(t *testing.T) {
 
 // TestNotesPostgresRoundTrip POSTs a unique note and asserts it shows
 // up in GET /notes. Covers the createNote + listNotes success paths
-// end-to-end.
+// end-to-end. Assumes the schema has been pre-created by TestMain
+// (which calls RunMigrations before any tests run); without that
+// the alphabetical order would put this test before TestRunMigrations
+// and the INSERT would fail with "relation does not exist".
 func TestNotesPostgresRoundTrip(t *testing.T) {
 	db := openTestDB(t)
 	srv := NewServer(db)
@@ -392,18 +431,25 @@ func TestListNotesPostgresDBError(t *testing.T) {
 	}
 }
 
-// TestRunMigrations verifies RunMigrations creates the notes table
-// and is idempotent (re-running is a no-op). This is the test
-// counterpart to the `migrate` subcommand in cmd/server.
+// TestRunMigrations verifies RunMigrations is idempotent (calling
+// it twice is a no-op the second time) and that the resulting
+// schema includes the `notes` table and `notes_created_at_idx`
+// index. TestMain (above) is responsible for the *first* call to
+// RunMigrations; this test verifies the *idempotency* property
+// and confirms the expected schema state.
 func TestRunMigrations(t *testing.T) {
 	db := openTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// First run: should create the table. If a previous test run
-	// already created it, IF NOT EXISTS makes this a no-op.
+	// The first call (in TestMain) created the table. This second
+	// call must be a no-op. If RunMigrations isn't idempotent,
+	// this fails. (Prior to TestMain, a first-call RunMigrations
+	// here was racy with TestNotesPostgresRoundTrip: alphabetical
+	// order put the round-trip first, so its INSERT hit a
+	// non-existent table.)
 	if err := RunMigrations(ctx, db); err != nil {
-		t.Fatalf("first RunMigrations: %v", err)
+		t.Fatalf("RunMigrations (idempotent re-run): %v", err)
 	}
 
 	// Verify the table exists by querying pg_tables.
@@ -414,15 +460,10 @@ func TestRunMigrations(t *testing.T) {
 		t.Fatalf("query pg_tables: %v", err)
 	}
 	if !exists {
-		t.Fatal("expected `notes` table to exist after RunMigrations")
+		t.Fatal("expected `notes` table to exist (TestMain should have run RunMigrations)")
 	}
 
-	// Second run: must be a no-op (idempotent).
-	if err := RunMigrations(ctx, db); err != nil {
-		t.Fatalf("second RunMigrations (idempotent): %v", err)
-	}
-
-	// Third sanity: the index from migration001Notes should also exist.
+	// Sanity: the index from migration001Notes should also exist.
 	var indexExists bool
 	row = db.QueryRowContext(ctx,
 		`SELECT EXISTS (SELECT 1 FROM pg_indexes
