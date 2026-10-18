@@ -136,3 +136,40 @@ class TestDockerfileUsesGoModTidy:
         t = _scaffold(scaffold_target)
         text = (t / "Dockerfile").read_text()
         assert "go.sum*" in text
+
+    def test_dockerfile_runs_go_mod_tidy_after_source_copy(self, scaffold_target):
+        """`go mod tidy` must run AFTER the source is copied,
+        not before. Otherwise the blank import of the pgx stdlib
+        driver in cmd/server/main.go (`_ "github.com/jackc/pgx/v5/stdlib"`)
+        isn't visible to `go mod tidy`, the stdlib subpackage
+        doesn't make it into go.mod, and the subsequent `go build`
+        fails with "no required module provides package
+        github.com/jackc/pgx/v5/stdlib".
+
+        Regression guard for the first end-to-end run of the
+        postgres scaffold (2026-10-18): the Dockerfile's
+        `RUN go mod tidy` ran before `COPY cmd` / `COPY internal`,
+        so the source wasn't visible to tidy."""
+        t = _scaffold(scaffold_target, db="postgres")
+        text = (t / "Dockerfile").read_text()
+        # Find the line numbers of `RUN go mod tidy` and the
+        # first `COPY cmd` or `COPY internal` line after it.
+        tidy_idx = text.find("RUN go mod tidy")
+        assert tidy_idx > 0, "expected `RUN go mod tidy` in Dockerfile"
+        after = text[tidy_idx:]
+        # The first COPY cmd/ COPY internal line must come BEFORE
+        # the RUN go mod tidy line. We check by looking at the
+        # position of `RUN go mod tidy` in the full text vs. the
+        # position of the source COPY lines.
+        cmd_copy_idx = text.find("COPY cmd ./cmd")
+        internal_copy_idx = text.find("COPY internal ./internal")
+        # Use the first matching COPY (whichever comes first).
+        source_copy_idx = min(
+            i for i in (cmd_copy_idx, internal_copy_idx) if i > 0
+        )
+        assert source_copy_idx < tidy_idx, (
+            "Dockerfile: `RUN go mod tidy` must run AFTER the source is "
+            "copied (so blank imports of pgx/v5/stdlib are visible to tidy). "
+            f"Found source COPY at byte {source_copy_idx} but `RUN go mod tidy` "
+            f"at byte {tidy_idx}."
+        )

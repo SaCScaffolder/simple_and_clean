@@ -12,6 +12,17 @@ WORKDIR /src
 
 # Cache go.mod/go.sum first so dependency downloads don't bust on every code change.
 COPY go.mod go.sum* ./
+# Copy the source BEFORE `go mod tidy` so the blank import of
+# the pgx stdlib driver in cmd/server/main.go is visible to
+# `go mod tidy`. Without this, `go mod tidy` runs before the
+# source is in place, doesn't see the `_ "pgx/v5/stdlib"`
+# import, and leaves the stdlib subpackage out of go.mod. The
+# subsequent `go build` then fails with "no required module
+# provides package github.com/jackc/pgx/v5/stdlib".
+# (Surfaced on the first end-to-end run of the postgres
+# scaffold, 2026-10-18.)
+COPY cmd ./cmd
+COPY internal ./internal
 # `go mod download` (the previous command) only writes the
 # `/go.mod h1:...` entries to go.sum. For a freshly-scaffolded
 # go.mod with no go.sum, it doesn't add the indirect entries to
@@ -22,9 +33,7 @@ COPY go.mod go.sum* ./
 # Same fix as the ci.yml workflow (2026-10-18).
 RUN go mod tidy
 
-# Now the source.
-COPY cmd ./cmd
-COPY internal ./internal
+# Now we have all the source + go.sum. Build the binary.
 
 # -trimpath  → reproducible builds (no absolute paths in the binary)
 # -ldflags   → strip debug info + set a build-time version
