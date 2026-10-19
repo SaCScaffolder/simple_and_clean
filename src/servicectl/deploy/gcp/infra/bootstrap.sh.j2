@@ -46,6 +46,18 @@ POOL_ID="{{ service_name }}-github-pool"
 PROVIDER_ID="{{ service_name }}-github-provider"
 CI_SA_ID="{{ service_name }}-ci"
 
+# GCP caps display names at 32 characters (silent reject on `create` with
+# INVALID_ARGUMENT otherwise). Keep all three display names short enough
+# that a long service_name or repo path still fits. The trailing `:0:32`
+# bash truncation is the safety net; the strings above are tuned so the
+# typical case doesn't hit it.
+DISPLAY_POOL="{{ service_name }} gh pool"
+DISPLAY_POOL="${DISPLAY_POOL:0:32}"
+DISPLAY_PROVIDER="gh for ${GITHUB_REPO}"
+DISPLAY_PROVIDER="${DISPLAY_PROVIDER:0:32}"
+DISPLAY_CI_SA="{{ service_name }} ci sa"
+DISPLAY_CI_SA="${DISPLAY_CI_SA:0:32}"
+
 echo "==> Project:       $PROJECT_ID"
 echo "==> GitHub repo:   $GITHUB_REPO"
 echo "==> WIF pool:      $POOL_ID"
@@ -70,7 +82,7 @@ if ! gcloud iam workload-identity-pools describe "$POOL_ID" --project="$PROJECT_
   gcloud iam workload-identity-pools create "$POOL_ID" \
       --project="$PROJECT_ID" \
       --location=global \
-      --display-name="{{ service_name }} GitHub Actions pool" \
+      --display-name="$DISPLAY_POOL" \
       >/dev/null
 fi
 
@@ -84,7 +96,7 @@ if ! gcloud iam workload-identity-pools providers describe "$PROVIDER_ID" \
       --project="$PROJECT_ID" \
       --location=global \
       --workload-identity-pool="$POOL_ID" \
-      --display-name="GitHub Actions for ${GITHUB_REPO}" \
+      --display-name="$DISPLAY_PROVIDER" \
       --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.ref=assertion.ref" \
       --issuer-uri="https://token.actions.githubusercontent.com" \
       --attribute-condition="attribute.repository == '${GITHUB_REPO}'" \
@@ -98,7 +110,7 @@ CI_SA_EMAIL="${CI_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 if ! gcloud iam service-accounts describe "$CI_SA_EMAIL" --project="$PROJECT_ID" >/dev/null 2>&1; then
   gcloud iam service-accounts create "$CI_SA_ID" \
       --project="$PROJECT_ID" \
-      --display-name="{{ service_name }} CI service account" \
+      --display-name="$DISPLAY_CI_SA" \
       --description="GitHub Actions deploys as this account via WIF." \
       >/dev/null
 fi
