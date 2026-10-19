@@ -1,7 +1,8 @@
 // Package {{ service_name_snake }} is the HTTP handler layer for {{ service_name }}.
 //
-// This is the smallest useful scaffold: a mux with /healthz and /readyz,
-// plus a stub index handler. Replace it with your real handlers.
+// This is the smallest useful scaffold: a mux with /healthz, /readyz,
+// an index handler, and (when --db=postgres) a /notes resource
+// backed by postgres. Replace it with your real handlers.
 //
 // Convention: handlers are methods on a *Server struct so you can inject
 // dependencies (DB, logger, config) via NewServer and pass *Server around.
@@ -9,12 +10,19 @@
 package {{ service_name_snake }}
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+{% if db == 'postgres' %}
+	"errors"
+{% endif %}
 	"net/http"
+	"time"
 )
 
 // NewMux returns a mux with the baseline /healthz and /readyz endpoints
-// wired up. This is what cmd/server/main.go uses by default.
+// wired up and no DB. This is what cmd/server/main.go uses when
+// $DATABASE_URL is unset (e.g. a smoke test that doesn't need a DB).
 //
 // For real services, prefer NewServer(deps).Mux() so you can pass a DB,
 // logger, config, etc. into the handlers.
@@ -25,13 +33,16 @@ func NewMux() *http.ServeMux {
 // Server holds the dependencies your handlers need. Add fields as you go:
 // db *sql.DB, log *slog.Logger, cfg *Config, etc.
 type Server struct {
-	// deps placeholder — fill in as the service grows.
+	// db is the postgres connection pool. nil means "no DB configured"
+	// (--db != postgres, or a smoke test that doesn't need a DB). When
+	// nil, /readyz returns 200 unconditionally and /notes returns 503.
+	db *sql.DB
 }
 
-// NewServer constructs a Server. Pass nil for the scaffold; pass real
-// dependencies for a real service.
-func NewServer(_ any) *Server {
-	return &Server{}
+// NewServer constructs a Server. Pass nil for the scaffold without a DB;
+// pass a *sql.DB for a real service.
+func NewServer(db *sql.DB) *Server {
+	return &Server{db: db}
 }
 
 // Mux returns the HTTP mux with all routes registered.
@@ -40,6 +51,14 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/healthz", s.healthz)
 	mux.HandleFunc("/readyz", s.readyz)
 	mux.HandleFunc("/", s.index)
+{% if db == 'postgres' %}
+	// /notes is the postgres-backed resource. POST creates a row;
+	// GET lists the most recent 10. The handlers return 503 if no
+	// DB is configured (defensive — the k8s manifest only mounts
+	// these routes when --db=postgres, so a 503 here would indicate
+	// a misconfiguration).
+	mux.HandleFunc("/notes", s.notes)
+{% endif %}
 	return mux
 }
 
@@ -50,9 +69,25 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 // readyz returns 200 when the service is ready to serve traffic. Used by
-// Kubernetes readiness probes. The scaffold always returns ready; replace
-// with real readiness checks (DB ping, dependency reachability, etc.).
+// Kubernetes readiness probes. The default scaffold (no DB) always
+// returns ready; when a DB is configured, we ping it. A 2-second
+// deadline keeps a slow DB from blocking the readiness probe past the
+// k8s readinessProbe timeout (which defaults to 1s but the probe's
+// `periodSeconds` is 5s, so a 2s budget gives us one retry).
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.db.PingContext(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "not_ready",
+			"reason": "db_ping_failed",
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
@@ -64,6 +99,198 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 		"status":  "running",
 	})
 }
+
+{% if db == 'postgres' %}
+// Note is the JSON shape returned by /notes.
+type Note struct {
+	ID        int64     `json:"id"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// notes handles both POST and GET on /notes.
+//   - POST: create a note. Body is `{"body": "..."}`. Returns 201 + the new row.
+//   - GET:  list the most recent 10 notes. Returns 200 + a JSON array.
+//   - 405:  any other method.
+//   - 503:  no DB configured (defensive; shouldn't happen in production).
+func (s *Server) notes(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "no database configured",
+		})
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		s.createNote(w, r)
+	case http.MethodGet:
+		s.listNotes(w, r)
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+	}
+}
+
+// createNote handles POST /notes. Body is `{"body": "..."}`.
+// Empty bodies are rejected with 400; anything over 1024 chars is
+// rejected with 400 to keep the demo table from filling with junk.
+func (s *Server) createNote(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid JSON body",
+		})
+		return
+	}
+	if req.Body == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "body is required",
+		})
+		return
+	}
+	if len(req.Body) > 1024 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "body must be 1024 characters or fewer",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	var n Note
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO notes (body) VALUES ($1)
+		 RETURNING id, body, created_at`,
+		req.Body,
+	).Scan(&n.ID, &n.Body, &n.CreatedAt)
+	if err != nil {
+		// Log the underlying error to stderr (the k8s pod log);
+		// return a generic message to the caller. We deliberately
+		// don't echo the SQL error to the response.
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "could not create note",
+		})
+		return
+	}
+	writeJSON(w, http.StatusCreated, n)
+}
+
+// listNotes handles GET /notes. Returns the most recent 10 notes,
+// newest first. 503 if the DB query fails (the deploy's smoke test
+// treats a 5xx here as a hard fail because it indicates the
+// end-to-end stack isn't working, not just a slow DB).
+func (s *Server) listNotes(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, body, created_at FROM notes
+		 ORDER BY created_at DESC LIMIT 10`,
+	)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "could not query notes",
+		})
+		return
+	}
+	defer rows.Close()
+
+	notes := make([]Note, 0, 10)
+	for rows.Next() {
+		var n Note
+		if err := rows.Scan(&n.ID, &n.Body, &n.CreatedAt); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"error": "could not scan note row",
+			})
+			return
+		}
+		notes = append(notes, n)
+	}
+	if err := rows.Err(); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "could not iterate notes",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, notes)
+}
+{% endif %}
+
+// Migrate runs the embedded SQL migration files in lexicographic
+// order against the configured DB. The default scaffold has no
+// migrations (the postgres path includes migrations/001_notes.sql).
+// Idempotent: every CREATE statement uses IF NOT EXISTS or IF
+// EXISTS as appropriate.
+//
+// This is invoked from main.go when the binary is run as
+// `<service_name> migrate` -- the deploy workflow does
+// `kubectl exec deploy/<name> -- /app/<service_name> migrate`
+// before bringing the new pods into rotation. Running
+// migrations out-of-band (vs. on app startup) means a failed
+// migration blocks the deploy rather than producing a
+// half-upgraded pod.
+//
+// Returns nil on success; returns the first migration's error
+// otherwise (no partial-application state -- migrations run
+// inside an implicit transaction per file via the pgx driver's
+// default behavior, and any single-file failure aborts the
+// migration set).
+{% if db == 'postgres' %}
+
+// RunMigrations runs every .sql file under migrations/ in
+// lexicographic order. The list is currently hardcoded to
+// {"migrations/001_notes.sql"} because embed.FS isn't worth
+// the extra dependency for a single-file scaffold; new
+// migrations get appended to the slice. Idempotent: every
+// CREATE statement uses IF NOT EXISTS or IF EXISTS as
+// appropriate.
+//
+// Called from main.go when the binary is run as
+// `<service_name> migrate` -- the deploy workflow does
+// `kubectl exec deploy/<name> -- /app/<service_name> migrate`
+// before bringing the new pods into rotation. Running
+// migrations out-of-band (vs. on app startup) means a
+// failed migration blocks the deploy rather than producing
+// a half-upgraded pod.
+//
+// Returns nil on success; returns the first migration's
+// error otherwise.
+func RunMigrations(ctx context.Context, db *sql.DB) error {
+	files := []migrationFile{
+		{name: "migrations/001_notes.sql", sql: migration001Notes},
+	}
+	for _, f := range files {
+		if _, err := db.ExecContext(ctx, f.sql); err != nil {
+			return errors.New(f.name + ": " + err.Error())
+		}
+	}
+	return nil
+}
+
+// migrationFile pairs a logical name (for error messages) with
+// the SQL text to execute.
+type migrationFile struct {
+	name string
+	sql  string
+}
+
+// migration001Notes is the SQL for migrations/001_notes.sql. Kept
+// in sync by hand; if you change the SQL file, change this
+// constant too. (We could embed with //go:embed, but for a
+// single-file scaffold the constant is clearer.)
+const migration001Notes = `CREATE TABLE IF NOT EXISTS notes (
+    id          BIGSERIAL PRIMARY KEY,
+    body        TEXT        NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS notes_created_at_idx
+    ON notes (created_at DESC);`
+{% endif %}
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")

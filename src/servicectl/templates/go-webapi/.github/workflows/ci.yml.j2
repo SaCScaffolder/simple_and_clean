@@ -53,8 +53,29 @@ jobs:
         with:
           go-version: "1.22"
           cache-dependency-path: go.sum
-      - name: go mod download
-        run: go mod download
+      - name: go mod tidy
+        # `go mod download` (the previous command) only writes the
+        # `/go.mod h1:...` entries to go.sum. It does NOT write the
+        # content hashes (`h1:...` without `/go.mod`) that `go vet`
+        # and `go build` need, AND it does NOT add the indirect
+        # entries to go.mod for transitive dependencies. With a
+        # freshly-scaffolded go.mod and no go.sum, this leaves
+        # `go vet` complaining about "missing go.sum entry" for
+        # every transitive dep, even though the module is in the
+        # cache.
+        #
+        # `go mod tidy` does all three things: writes the content
+        # hashes, writes the /go.mod entries, and adds the
+        # `// indirect` lines to go.mod for any module the source
+        # actually imports but isn't a direct require. The cache
+        # step above populates the module cache from a previous
+        # run's go.sum (if any), so tidy doesn't have to redownload
+        # everything from scratch.
+        #
+        # Fixed 2026-10-18 after PR #139's integration test failed
+        # exactly this way (pgx's transitive deps: pgpassfile,
+        # puddle, crypto, text, sync, etc.).
+        run: go mod tidy
       - name: go vet
         run: go vet ./...
       - name: go test (with coverage)

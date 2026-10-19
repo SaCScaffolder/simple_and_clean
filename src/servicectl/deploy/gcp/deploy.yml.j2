@@ -144,7 +144,7 @@ jobs:
 {% if gcp_postgres_enabled %}
           # Same injection for the cloudsql-proxy sidecar. The base
           # kustomization references both <service> and
-          # <service>-cloudsql-proxy in its images block, so
+          # <service>-cloudsql-proxy in its `images:` block, so
           # `kustomize edit set image` only patches the app container.
           # We do the proxy explicitly so its image tag is in lockstep
           # with the app. The proxy image is the same GAR repo with a
@@ -156,6 +156,54 @@ jobs:
               {{ service_name }}-cloudsql-proxy=${{ '{{' }} env.IMAGE {{ '}}' }}-cloudsql-proxy || true
 {% endif %}
           kubectl apply -k .
+
+{% if gcp_postgres_enabled %}
+      - name: Run database migrations
+        if: {% raw %}${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}{% endraw %}
+        # The `migrate` subcommand in the app binary runs every SQL file
+        # under `migrations/` in lexicographic order. It's idempotent
+        # (every CREATE uses IF NOT EXISTS), so re-running on every
+        # push is safe. We run it via `kubectl exec` against the
+        # already-deployed pod so the migrate process has the same
+        # DATABASE_URL and the same cloudsql-proxy sidecar that the
+        # app uses.
+        #
+        # This step runs AFTER `kustomize-apply manifests` because
+        # `kubectl exec` needs a pod to exist, and the pod only exists
+        # after kustomize has created the Deployment. We wait for the
+        # pod to be at least schedulable (or Ready) before invoking
+        # exec, because the pod's first ~30-60s may be in
+        # `ImagePullBackOff` while GAR propagates the freshly-pushed
+        # image. The smoke test downstream will hit /healthz
+        # (passes even during the GAR wait) and then /readyz (which
+        # only goes green once the cloudsql-proxy can reach the
+        # Cloud SQL Admin API).
+        run: |
+          set -euo pipefail
+          DEPLOY_NAME="dev-{{ service_name }}"
+          # Wait for at least one pod to be Ready (or at least
+          # schedulable -- we don't require a successful app
+          # readiness, just that the container is up enough for
+          # `kubectl exec` to work).
+          for i in {1..30}; do
+            READY="$(kubectl get deploy "${DEPLOY_NAME}" \
+                -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")"
+            if [ "${READY}" != "0" ] && [ -n "${READY}" ]; then
+              echo "Deployment has ${READY} ready replica(s) after ${i} attempts"
+              break
+            fi
+            sleep 5
+          done
+          POD="$(kubectl get pod -l app={{ service_name }} \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+          if [ -z "${POD}" ]; then
+            echo "No pod found for app={{ service_name }}; skipping migrations" >&2
+            exit 0
+          fi
+          echo "Running migrations against pod ${POD}..."
+          kubectl exec "${POD}" -- /app/{{ service_name }} migrate
+          echo "Migrations complete"
+{% endif %}
 
       - name: Wait for ingress IP and patch overlay with real hostname
         if: {% raw %}${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}{% endraw %}
@@ -246,6 +294,25 @@ jobs:
               done
               if [ "${READYZ_OK}" = "false" ]; then
                 echo "::warning::Readyz did not return 200 within 2 minutes; the DB may not be reachable from the cloudsql-proxy. The deploy itself succeeded; investigate the proxy and the Workload Identity binding." >&2
+              fi
+              # Now that /readyz is green, the DB is reachable end-to-end.
+              # POST a note, then GET the list and assert the note is in
+              # the response. This is the real signal that the full
+              # stack (app -> cloudsql-proxy -> Cloud SQL) is wired up,
+              # not just that the proxy can talk to the Admin API.
+              NOTE_BODY="hello-from-deploy-$(date +%s)"
+              CREATED_ID="$(curl -sf -X POST -H 'Content-Type: application/json' \
+                  -d "{\"body\":\"${NOTE_BODY}\"}" \
+                  "https://${URL}/notes" | jq -r '.id')"
+              if [ -z "${CREATED_ID}" ] || [ "${CREATED_ID}" = "null" ]; then
+                echo "::warning::POST /notes did not return an id; DB writes are not working. The deploy itself succeeded; investigate the proxy connection." >&2
+              else
+                LISTED="$(curl -sf "https://${URL}/notes" | jq -r --arg id "${CREATED_ID}" '.[] | select(.id == ($id | tonumber)) | .body')"
+                if [ "${LISTED}" = "${NOTE_BODY}" ]; then
+                  echo "DB round-trip ok: POST /notes created id=${CREATED_ID}, GET /notes returned the same body"
+                else
+                  echo "::warning::GET /notes did not return the POSTed body (id=${CREATED_ID}); DB round-trip failed" >&2
+                fi
               fi
 {% endif %}
               exit 0
