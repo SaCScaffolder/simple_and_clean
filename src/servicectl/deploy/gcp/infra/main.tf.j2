@@ -98,7 +98,7 @@ provider "google-beta" {
 # GCP service account IDs disallow underscores (regex: ^[a-z](?:[-a-z0-9]{4,28}[a-z0-9])$),
 # so we use the dashed service_name (e.g. `my-svc`) directly.
 resource "google_service_account" "runtime" {
-  account_id   = "{{ service_name }}-runtime"
+  account_id   = "{{ service_id }}-runtime"
   display_name = "{{ service_name }} runtime service account"
   description  = "Least-privilege identity for the {{ service_name }} service at runtime."
 }
@@ -107,7 +107,7 @@ resource "google_service_account" "runtime" {
 # Artifact Registry IDs allow letters, digits, dashes, underscores; we use the
 # dashed service_name for consistency with the service account above.
 resource "google_artifact_registry_repository" "images" {
-  repository_id = "{{ service_name }}"
+  repository_id = "{{ service_id }}"
   description   = "Docker images for {{ service_name }}"
   format        = "DOCKER"
   location      = var.region
@@ -151,7 +151,7 @@ module "cloud_run" {
 
   project_id           = var.project_id
   region               = var.region
-  service_name         = "{{ service_name }}"
+  service_name         = "{{ service_id }}"
   image                = var.image
   runtime_sa_email     = google_service_account.runtime.email
   artifact_registry_repo = google_artifact_registry_repository.images.name
@@ -169,7 +169,7 @@ module "gke_autopilot" {
 
   project_id            = var.project_id
   region                = var.region
-  cluster_name          = "{{ service_name }}-{{ '{{' }}var.environment{{ '}}' }}"
+  cluster_name          = "{{ service_id }}-{{ '{{' }}var.environment{{ '}}' }}"
   runtime_sa_email      = google_service_account.runtime.email
   artifact_registry_repo = google_artifact_registry_repository.images.name
   environment           = var.environment
@@ -209,7 +209,7 @@ module "cloudsql" {
   project_id       = var.project_id
   region           = var.region
   environment      = var.environment
-  service_name     = "{{ service_name }}"
+  service_name     = "{{ service_id }}"
   runtime_sa_email = google_service_account.runtime.email
 
   db_tier              = var.db_tier

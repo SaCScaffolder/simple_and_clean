@@ -1,4 +1,4 @@
-{% if gcp_postgres_enabled %}# {{ service_name }} — Cloud SQL Auth Proxy sidecar.
+{% if gcp_postgres_enabled %}# {{ service_id }} — Cloud SQL Auth Proxy sidecar.
 #
 # The proxy runs as a second container in the same pod as the app
 # (separate Deployment so the two can be scaled independently). It
@@ -24,25 +24,25 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ service_name }}-cloudsql-proxy
+  name: {{ service_id }}-cloudsql-proxy
   labels:
-    app: {{ service_name }}
+    app: {{ service_id }}
     component: cloudsql-proxy
     managed_by: servicectl
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: {{ service_name }}
+      app: {{ service_id }}
       component: cloudsql-proxy
   template:
     metadata:
       labels:
-        app: {{ service_name }}
+        app: {{ service_id }}
         component: cloudsql-proxy
         managed_by: servicectl
     spec:
-      serviceAccountName: {{ service_name }}
+      serviceAccountName: {{ service_id }}
       # The proxy image is the official Google-maintained one.
       # It is a small (~10 MB) Go binary that does TLS + IAM auth
       # against the Cloud SQL Admin API, then forwards plaintext

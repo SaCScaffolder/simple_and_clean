@@ -21,9 +21,9 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ service_name }}
+  name: {{ service_id }}
   labels:
-    app: {{ service_name }}
+    app: {{ service_id }}
     managed_by: servicectl
   annotations:
     # Use the GCE ingress class (creates a Google Cloud Load Balancer).
@@ -31,7 +31,7 @@ metadata:
     # Allow the cert to be issued and renewed for the domain set
     # in spec.rules[0].host. The cert is managed by GKE; we don't
     # need to provision anything outside the cluster for it.
-    networking.gke.io/managed-certificates: {{ service_name }}-cert
+    networking.gke.io/managed-certificates: {{ service_id }}-cert
 spec:
   # Default backend if no rule matches. GCE Ingress requires a
   # default backend; we point it at the Service so the load
@@ -39,7 +39,7 @@ spec:
   # hasn't been issued yet.
   defaultBackend:
     service:
-      name: {{ service_name }}
+      name: {{ service_id }}
       port:
         number: 80
   rules:
@@ -50,7 +50,7 @@ spec:
             pathType: implementationSpecific
             backend:
               service:
-                name: {{ service_name }}
+                name: {{ service_id }}
                 port:
                   number: 80
 ---
@@ -64,9 +64,9 @@ spec:
 apiVersion: networking.gke.io/v1
 kind: ManagedCertificate
 metadata:
-  name: {{ service_name }}-cert
+  name: {{ service_id }}-cert
   labels:
-    app: {{ service_name }}
+    app: {{ service_id }}
     managed_by: servicectl
 spec:
   domains:

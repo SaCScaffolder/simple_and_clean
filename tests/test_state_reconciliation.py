@@ -145,9 +145,13 @@ class TargetExistsTests(unittest.TestCase):
 
     def test_target_is_a_file_not_a_dir(self):
         """If the target path is a file (not a directory), clear error
-        that distinguishes from "directory already exists"."""
+        that distinguishes from "directory already exists".
+
+        Note: under PR #141's normalization, `is_a_file` becomes
+        `is-a-file` as the target. So we put the file at the
+        *normalized* target path to exercise the same code path."""
         with tempfile.TemporaryDirectory() as td:
-            target = Path(td) / "is_a_file"
+            target = Path(td) / "is-a-file"
             target.write_text("I'm a file, not a dir")
             with self.assertRaises(ScaffoldError) as cm:
                 _scaffold(Path(td), "is_a_file")
@@ -222,25 +226,30 @@ class NameVariantTests(unittest.TestCase):
             self.assertEqual(target.name, "my-cool-service")
 
     def test_dotted_name(self):
+        # Dotted input normalizes to dashed form (PR #141).
         with tempfile.TemporaryDirectory() as td:
             target = _scaffold(Path(td), "my.service.v2")
             self.assertTrue(target.is_dir())
-            self.assertEqual(target.name, "my.service.v2")
+            self.assertEqual(target.name, "my-service-v2")
 
     def test_underscored_name(self):
+        # Underscored input normalizes to dashed form (PR #141).
         with tempfile.TemporaryDirectory() as td:
             target = _scaffold(Path(td), "my_cool_service")
             self.assertTrue(target.is_dir())
-            self.assertEqual(target.name, "my_cool_service")
+            self.assertEqual(target.name, "my-cool-service")
 
     def test_invalid_name_chars_refused(self):
-        """Names with spaces, slashes, etc. are refused before any FS op."""
+        """Names with chars that cannot be collapsed (e.g. `/`) are
+        refused before any FS op. Spaces and underscores are no longer
+        refused -- they get collapsed to dashes by PR #141's
+        normalization."""
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(ScaffoldError) as cm:
-                _scaffold(Path(td), "bad name with spaces")
+                _scaffold(Path(td), "bad/name/with/slashes")
             self.assertIn("invalid character", str(cm.exception))
             # Make sure no folder was created.
-            self.assertFalse((Path(td) / "bad name with spaces").exists())
+            self.assertFalse((Path(td) / "bad/name/with/slashes").exists())
 
 
 if __name__ == "__main__":
