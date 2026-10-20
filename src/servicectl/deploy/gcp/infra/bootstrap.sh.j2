@@ -40,22 +40,23 @@ if [[ -z "$GITHUB_REPO" ]]; then
   exit 1
 fi
 
-# GCP resource IDs (pool, provider, SA) disallow underscores, so we use the
-# dashed service_name (e.g. `my-svc`) rather than the snake-cased variant.
-POOL_ID="{{ service_name }}-github-pool"
-PROVIDER_ID="{{ service_name }}-github-provider"
-CI_SA_ID="{{ service_name }}-ci"
+# GCP resource IDs (pool, provider, SA) disallow underscores, so we use
+# {{ service_id }} (always dashed-lowercase after renderer __post_init__)
+# rather than the raw user-typed service_name.
+POOL_ID="{{ service_id }}-github-pool"
+PROVIDER_ID="{{ service_id }}-github-provider"
+CI_SA_ID="{{ service_id }}-ci"
 
 # GCP caps display names at 32 characters (silent reject on `create` with
 # INVALID_ARGUMENT otherwise). Keep all three display names short enough
 # that a long service_name or repo path still fits. The trailing `:0:32`
 # bash truncation is the safety net; the strings above are tuned so the
 # typical case doesn't hit it.
-DISPLAY_POOL="{{ service_name }} gh pool"
+DISPLAY_POOL="{{ service_id }} gh pool"
 DISPLAY_POOL="${DISPLAY_POOL:0:32}"
 DISPLAY_PROVIDER="gh for ${GITHUB_REPO}"
 DISPLAY_PROVIDER="${DISPLAY_PROVIDER:0:32}"
-DISPLAY_CI_SA="{{ service_name }} ci sa"
+DISPLAY_CI_SA="{{ service_id }} ci sa"
 DISPLAY_CI_SA="${DISPLAY_CI_SA:0:32}"
 
 echo "==> Project:       $PROJECT_ID"

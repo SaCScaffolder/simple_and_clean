@@ -109,14 +109,20 @@ def test_go_webapi_scaffolds():
 
 
 def test_go_webapi_dashed_name_substitutes_correctly():
+    # The typed name is normalized by PR #141: "billing.api"
+    # becomes "billing-api". The Go package dir is still snake
+    # (derived from the normalized dashed form), and the
+    # service-name comment in main.go uses the normalized dashed
+    # form too.
     with tempfile.TemporaryDirectory() as td:
         target = _scaffold(Path(td), "billing.api", "go-webapi")
-        # snake_case for Go package paths.
+        # snake_case for Go package paths (derived from normalized
+        # "billing-api" -> "billing_api").
         assert (target / "internal" / "billing_api" / "server.go").exists()
         assert (target / "internal" / "billing_api" / "server_test.go").exists()
-        # Service name should appear in main.go.
+        # Service name should appear in main.go (now normalized).
         main = (target / "cmd" / "server" / "main.go").read_text()
-        assert "billing.api" in main
+        assert "billing-api" in main
 
 
 def test_node_react_web_scaffolds():
@@ -1267,13 +1273,15 @@ def test_git_remote_with_no_git_does_not_crash():
 
 
 def test_dashed_name_renders_correctly():
+    # Typed `my-cool.api` is normalized to `my-cool-api` by PR #141.
     with tempfile.TemporaryDirectory() as td:
         target = _scaffold(Path(td), "my-cool.api", "python-flask", ci_provider="azure-devops")
-        # Filenames should be exactly the supplied name.
-        assert target.name == "my-cool.api"
-        # ADO pipeline should be generated and contain the name.
+        # Directory name is the normalized form.
+        assert target.name == "my-cool-api"
+        # ADO pipeline should be generated and contain the name
+        # (now normalized too).
         yml = (target / "azure-pipelines.yml").read_text()
-        assert "my-cool.api" in yml
+        assert "my-cool-api" in yml
         # ADO pipeline should NOT have a GH-Actions-only file extension leak.
         assert ".github" not in yml
 

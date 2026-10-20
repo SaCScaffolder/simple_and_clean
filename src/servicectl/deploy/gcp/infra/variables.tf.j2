@@ -26,9 +26,9 @@ variable "environment" {
 }
 
 variable "image" {
-  description = "Container image to deploy (e.g. {{ registry }}/{{ service_name }}:sha-abc1234)."
+  description = "Container image to deploy (e.g. {{ registry }}/{{ service_id }}:sha-abc1234)."
   type        = string
-  default     = "{{ registry }}/{{ service_name }}:latest"
+  default     = "{{ registry }}/{{ service_id }}:latest"
 }
 
 {% if gcp_cloud_run_enabled %}

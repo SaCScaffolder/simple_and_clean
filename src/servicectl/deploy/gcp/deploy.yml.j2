@@ -16,7 +16,7 @@ on:
           - prod
 
 env:
-  SERVICE_NAME: {{ service_name }}
+  SERVICE_NAME: {{ service_id }}
   IMAGE_NAME: {{ image_name }}
 
 jobs:
@@ -57,7 +57,7 @@ jobs:
           REGION="${{ '{{' }} github.event.repository.name {{ '}}' }}"  # placeholder; replaced below
           REGION="${GCP_REGION:-{{ gcp_region }}}"
           PROJECT="{% raw %}${{ secrets.GCP_PROJECT_ID }}{% endraw %}"
-          REPO="{{ service_name }}"
+          REPO="{{ service_id }}"
           echo "host=${REGION}-docker.pkg.dev" >> "$GITHUB_OUTPUT"
           echo "image=${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE_NAME}" >> "$GITHUB_OUTPUT"
 
@@ -140,7 +140,7 @@ jobs:
           # Inject the freshly-pushed image into the kustomize overlay.
           cd "k8s/overlays/${ENV}"
           kustomize edit set image \
-              {{ service_name }}=${{ '{{' }} env.IMAGE {{ '}}' }}
+              {{ service_id }}=${{ '{{' }} env.IMAGE {{ '}}' }}
 {% if gcp_postgres_enabled %}
           # Same injection for the cloudsql-proxy sidecar. The base
           # kustomization references both <service> and
@@ -153,7 +153,7 @@ jobs:
           # (see k8s/base/cloudsql-proxy.yaml.j2), so the edit fails
           # silently if the image isn't named the same way.
           kustomize edit set image \
-              {{ service_name }}-cloudsql-proxy=${{ '{{' }} env.IMAGE {{ '}}' }}-cloudsql-proxy || true
+              {{ service_id }}-cloudsql-proxy=${{ '{{' }} env.IMAGE {{ '}}' }}-cloudsql-proxy || true
 {% endif %}
           kubectl apply -k .
 
@@ -180,7 +180,7 @@ jobs:
         # Cloud SQL Admin API).
         run: |
           set -euo pipefail
-          DEPLOY_NAME="dev-{{ service_name }}"
+          DEPLOY_NAME="dev-{{ service_id }}"
           # Wait for at least one pod to be Ready (or at least
           # schedulable -- we don't require a successful app
           # readiness, just that the container is up enough for
@@ -194,14 +194,14 @@ jobs:
             fi
             sleep 5
           done
-          POD="$(kubectl get pod -l app={{ service_name }} \
+          POD="$(kubectl get pod -l app={{ service_id }} \
               -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
           if [ -z "${POD}" ]; then
-            echo "No pod found for app={{ service_name }}; skipping migrations" >&2
+            echo "No pod found for app={{ service_id }}; skipping migrations" >&2
             exit 0
           fi
           echo "Running migrations against pod ${POD}..."
-          kubectl exec "${POD}" -- /app/{{ service_name }} migrate
+          kubectl exec "${POD}" -- /app/{{ service_id }} migrate
           echo "Migrations complete"
 {% endif %}
 
@@ -224,7 +224,7 @@ jobs:
         run: |
           set -euo pipefail
           ENV="{{ '{{' }} inputs.environment || 'dev' {{ '}}' }}"
-          INGRESS_NAME="dev-{{ service_name }}"
+          INGRESS_NAME="dev-{{ service_id }}"
           IP=""
           for i in {1..60}; do
             IP="$(kubectl get ingress "${INGRESS_NAME}" \
@@ -252,11 +252,11 @@ jobs:
 {% if gcp_cloud_run_enabled %}
           URL="$(terraform -chdir=infra output -raw service_url)"
 {% elif gcp_gke_autopilot_enabled %}
-          URL="$(kubectl get svc -l app={{ service_name }} -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+          URL="$(kubectl get svc -l app={{ service_id }} -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
           if [ -z "$URL" ]; then
-            URL="$(kubectl get svc -l app={{ service_name }} -o jsonpath='{.items[0].spec.clusterIP}')"
+            URL="$(kubectl get svc -l app={{ service_id }} -o jsonpath='{.items[0].spec.clusterIP}')"
             echo "No external LB; falling back to in-cluster health check via port-forward"
-            kubectl port-forward svc/{{ service_name }} 8080:80 &
+            kubectl port-forward svc/{{ service_id }} 8080:80 &
             PF_PID=$!
             sleep 5
             for i in {1..30}; do

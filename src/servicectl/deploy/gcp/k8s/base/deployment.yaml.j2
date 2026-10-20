@@ -26,22 +26,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ service_name }}
+  name: {{ service_id }}
   labels:
-    app: {{ service_name }}
+    app: {{ service_id }}
     managed_by: servicectl
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: {{ service_name }}
+      app: {{ service_id }}
   template:
     metadata:
       labels:
-        app: {{ service_name }}
+        app: {{ service_id }}
         managed_by: servicectl
     spec:
-      serviceAccountName: {{ service_name }}
+      serviceAccountName: {{ service_id }}
       {% if gcp_postgres_enabled %}# The postgres password is bootstrapped into this Secret by
       # deploy.yml (PR 3) right before `kubectl apply -k`. The Secret
       # is not committed to the repo and is not created by kustomize
@@ -49,7 +49,7 @@ spec:
       # sidecar reads its own copy from the same Secret via the
       # `db-credentials-cloudsql-proxy` env var below.
       {% endif %}containers:
-        - name: {{ service_name }}
+        - name: {{ service_id }}
           image: {{ image_name }}:latest
           ports:
             - name: http

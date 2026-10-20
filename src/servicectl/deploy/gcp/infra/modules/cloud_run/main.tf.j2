@@ -9,7 +9,7 @@ resource "google_project_service" "cloudrun" {
 # Allow the runtime SA to be invoked by anyone (public Cloud Run service).
 # Lock this down further with IAM conditions if the service is internal-only.
 resource "google_cloud_run_service" "service" {
-  name     = "{{ service_name }}-${var.environment}"
+  name     = "{{ service_id }}-${var.environment}"
   location = var.region
 
   template {

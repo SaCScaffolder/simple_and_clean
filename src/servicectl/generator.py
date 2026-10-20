@@ -78,11 +78,52 @@ class ServiceGenerator:
     # Terraform modules for both `gcp-cloud-run` and `gcp-gke-autopilot`.
     _DEPLOY_TARGETS = {"local", "azure", "gcp-cloud-run", "gcp-gke-autopilot"}
 
+    def __post_init__(self) -> None:
+        # Normalize the user-typed service name so it can land in any
+        # cloud/k8s/Terraform resource ID without further `replace()`
+        # calls scattered around the renderer and every .j2 template.
+        # After this method runs, `self.name` is always the canonical
+        # dashed-lowercase form (e.g. `ala-gcp-service-demo`)
+        # regardless of what the user typed.
+        #
+        # Why: GCP, k8s, and Terraform all reject uppercase, underscores,
+        # dots, and spaces in resource names. Some templates already did
+        # `.replace('_', '-')` inline (e.g. the gcp_runtime_sa_email
+        # and db_connection_name builders below) but most didn't, which
+        # led to `INVALID_ARGUMENT` errors at `gcloud ... create` time on
+        # user inputs containing underscores (e.g. `ala_gcp_service_demo`).
+        # Centralizing the normalization here means downstream consumers
+        # (the .j2 templates, the Snake/Pascal derivations, the email and
+        # connection-name builders, the k8s namespace, the GAR repo ID,
+        # etc.) can trust `self.name` to be resource-ID-legal.
+        normalized = (
+            self.name
+            .lower()
+            .replace("_", "-")
+            .replace(".", "-")
+            .replace(" ", "-")
+        )
+        # Strip leading/trailing dashes so a typo like `-foo-`
+        # doesn't produce `-foo-runtime` etc. (GCP/k8s reject
+        # names that start or end with a hyphen anyway.)
+        normalized = normalized.strip("-")
+        if not normalized:
+            raise ScaffoldError(
+                f"service name {self.name!r} normalizes to empty "
+                "(after lowercasing and collapsing separators). "
+                "Pick a name with at least one alphanumeric character."
+            )
+        self.name = normalized
+
     def _validate(self) -> None:
         if not self.name or self.name.strip() == "":
             raise ScaffoldError("service name cannot be empty")
-        # Conservative name check: letters, digits, dash, underscore, dot.
-        # Allows `my-service`, `my_service`, `my.service.v2`, etc.
+        # Validation runs *after* __post_init__ normalization, so by the
+        # time we get here `self.name` is already in the canonical
+        # dashed-lowercase form. The character check below is now
+        # strictly defensive: it should never fire because
+        # __post_init__ only accepts chars in [a-z0-9-] (after
+        # lowercase + separator collapse + strip).
         bad = set(" /\\?%*:|\"<>")
         if any(c in bad for c in self.name):
             raise ScaffoldError(f"service name contains invalid character(s): {sorted(bad & set(self.name))}")
@@ -157,8 +198,20 @@ class ServiceGenerator:
         gcp_postgres_enabled = is_gcp_gke_autopilot and self.db == "postgres"
         return {
             "service_name": self.name,
-            "service_name_snake": self.name.replace("-", "_").replace(".", "_"),
-            "service_name_pascal": "".join(part.capitalize() for part in self.name.replace("_", "-").split("-")),
+            # service_name_snake / service_name_pascal are derived from
+            # the already-normalized self.name, so the inline `.replace()`
+            # calls are no longer needed. Kept simple.
+            "service_name_snake": self.name.replace("-", "_"),
+            "service_name_pascal": "".join(part.capitalize() for part in self.name.split("-")),
+            # `service_id` is an alias for `service_name` after
+            # normalization, exposed under a name that makes the
+            # template-author's intent explicit: "this is the value
+            # that goes into a resource ID, which must be lowercase
+            # + dashed + alphanumeric-only". Templates that need a
+            # resource-ID-legal value should prefer `service_id` over
+            # `service_name` to make that intent visible at the call
+            # site.
+            "service_id": self.name,
             "template": self.template,
             "template_description": get_template_description(self.template),
             "ci_provider": self.ci_provider,
@@ -184,7 +237,7 @@ class ServiceGenerator:
     # (which references the GCP SA by email) lines up with what
     # `google_service_account.runtime.email` resolves to in main.tf.j2.
     "gcp_runtime_sa_email": (
-        f"{self.name.replace('_', '-')}-runtime@"
+        f"{self.name}-runtime@"
         f"{(self.gcp_project_id or 'REPLACE_WITH_GCP_PROJECT_ID')}.iam.gserviceaccount.com"
     ),
     # Default nip.io hostname for the dev overlay's Ingress. The
@@ -203,7 +256,7 @@ class ServiceGenerator:
     "db_connection_name": (
         f"{(self.gcp_project_id or 'REPLACE_WITH_GCP_PROJECT_ID')}:"
         f"{self.gcp_region}:"
-        f"{self.name.replace('_', '-')}-dev"
+        f"{self.name}-dev"
     ),
     # The hostname the Ingress routes to. Dev uses nip.io (free
     # wildcard DNS) keyed off the placeholder ingress IP; prod is

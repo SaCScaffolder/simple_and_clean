@@ -8,12 +8,12 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ service_name }}
+  name: {{ service_id }}
   labels:
-    app: {{ service_name }}
+    app: {{ service_id }}
     managed_by: servicectl
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: {{ service_name }}
+      app: {{ service_id }}

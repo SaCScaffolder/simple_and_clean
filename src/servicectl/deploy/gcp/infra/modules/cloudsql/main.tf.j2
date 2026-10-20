@@ -52,7 +52,7 @@ resource "google_project_service" "servicenetworking" {
 # collide with anything in the project's default network, which matters
 # when the project is shared with other workloads.
 resource "google_compute_network" "main" {
-  name                    = "{{ service_name }}-vpc"
+  name                    = "{{ service_id }}-vpc"
   auto_create_subnetworks = false
   routing_mode            = "REGIONAL"
 
@@ -62,7 +62,7 @@ resource "google_compute_network" "main" {
 # Subnet for the GKE Autopilot cluster's pods. Autopilot picks node
 # CIDRs from this subnetwork's range.
 resource "google_compute_subnetwork" "pods" {
-  name          = "{{ service_name }}-pods"
+  name          = "{{ service_id }}-pods"
   ip_cidr_range = var.pods_subnet_cidr
   region        = var.region
   network       = google_compute_network.main.id
@@ -84,7 +84,7 @@ resource "google_compute_subnetwork" "pods" {
 # IP block Cloud SQL will use when peered into our VPC. It must be a
 # /16 and must not overlap with any other range in the VPC.
 resource "google_compute_global_address" "private_services" {
-  name          = "{{ service_name }}-private-services"
+  name          = "{{ service_id }}-private-services"
   purpose       = "VPC_PEERING"
   address_type  = "INTERNAL"
   ip_version    = "IPV4"
@@ -116,10 +116,10 @@ resource "random_password" "db_password" {
 # fetches this into a k8s Secret (PR 3) and rotates it on a schedule
 # (future work).
 resource "google_secret_manager_secret" "db_password" {
-  secret_id = "{{ service_name }}-db-password-${var.environment}"
+  secret_id = "{{ service_id }}-db-password-${var.environment}"
 
   labels = {
-    service     = "{{ service_name }}"
+    service     = "{{ service_id }}"
     environment = var.environment
     managed_by  = "servicectl"
   }
@@ -146,7 +146,7 @@ resource "google_secret_manager_secret_version" "db_password" {
 # `backup_configuration.enabled` is on for prod, off for dev/staging
 # to save cost.
 resource "google_sql_database_instance" "main" {
-  name             = "{{ service_name }}-${var.environment}"
+  name             = "{{ service_id }}-${var.environment}"
   database_version = "POSTGRES_16"
   region           = var.region
 
