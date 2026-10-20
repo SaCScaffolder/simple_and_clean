@@ -259,7 +259,7 @@ deliberately does *not* do because they're one-time-per-project
 or one-time-per-cluster):
 
 - **WIF pool / provider / CI SA creation.** Lives in
-  `infra/bootstrap.sh` (one-time per project). Putting it in
+  `infra/bootstrap.sh` and `infra/bootstrap.ps1` (one-time per project). Putting it in
   Terraform would require the GitHub repo name as a `variable`,
   which is a deploy-time input; keeping it in a shell script
   makes that natural.

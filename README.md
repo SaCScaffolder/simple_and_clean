@@ -159,7 +159,8 @@ demo/
     ├── variables.tf.j2                # project_id, region, image, db_tier, db_name, db_user
     ├── outputs.tf.j2                  # cluster_name, db_connection_name, db_password_secret_id, ...
     ├── {dev,staging,prod}.tfvars.j2   # per-env overrides
-    ├── bootstrap.sh.j2                # one-time WIF + CI SA setup
+    ├── bootstrap.sh.j2                # one-time WIF + CI SA setup (bash)
+    ├── bootstrap.ps1.j2               # one-time WIF + CI SA setup (PowerShell 7+)
     └── modules/
         ├── gke_autopilot/             # cluster (VPC, subnetwork, secondary ranges)
         └── cloudsql/                  # postgres 16 (private IP, random password, Secret Manager)

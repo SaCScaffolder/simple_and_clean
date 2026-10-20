@@ -154,6 +154,11 @@ $ bash infra/bootstrap.sh
 =================================================================
 ```
 
+```powershell
+# Windows (PowerShell 7+):
+pwsh infra/bootstrap.ps1
+```
+
 Copy the three values into your GitHub repo's *Settings → Secrets
 and variables → Actions → New repository secret*. The names must
 be exact.
@@ -340,4 +345,9 @@ kubectl delete -k k8s/overlays/dev
 cd infra && terraform destroy -auto-approve && cd ..
 gcloud iam workload-identity-pools delete demo-github-pool --project=sacscaffolder --location=global
 gcloud iam service-accounts delete demo-ci@sacscaffolder.iam.gserviceaccount.com --project=sacscaffolder
+```
+
+```powershell
+# Windows (PowerShell 7+):
+pwsh infra/bootstrap.ps1
 ```
