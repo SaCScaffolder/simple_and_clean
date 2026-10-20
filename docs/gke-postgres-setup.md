@@ -51,7 +51,7 @@ first to be partially done:
    runtime SA to exist, so it runs after `terraform apply` has
    provisioned both.
 
-The first half is automated by `infra/bootstrap.sh` (rendered by
+The first half is automated by `infra/bootstrap.sh` and `infra/bootstrap.ps1` (rendered by
 `servicectl` from `src/servicectl/deploy/gcp/infra/bootstrap.sh.j2`).
 The second half is documented below because it has to be done after
 `terraform apply` and is a one-liner per project that doesn't
